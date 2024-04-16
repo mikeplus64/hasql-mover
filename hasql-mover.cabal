@@ -1,0 +1,88 @@
+cabal-version:   3.0
+name:            hasql-mover
+version:         0.1.0.0
+synopsis:        Hasql migrations library
+license:         BSD-3-Clause
+license-file:    LICENSE
+author:          Mike Ledger
+maintainer:      mike@quasimal.com
+category:        Database
+build-type:      Simple
+extra-doc-files: CHANGELOG.md
+
+library
+  exposed-modules:
+    Hasql.Mover
+    Hasql.Mover.CLI
+    Hasql.Mover.Type
+
+  build-depends:
+    , base
+    , bytestring
+    , crypton
+    , hasql
+    , hasql-th
+    , hasql-transaction
+    , sop-core
+    , text
+
+  hs-source-dirs:     src
+  default-language:   GHC2021
+  default-extensions:
+    AllowAmbiguousTypes
+    BangPatterns
+    BlockArguments
+    ConstraintKinds
+    DataKinds
+    DefaultSignatures
+    DeriveAnyClass
+    DeriveDataTypeable
+    DeriveFoldable
+    DeriveFunctor
+    DeriveGeneric
+    DeriveLift
+    DeriveTraversable
+    DerivingStrategies
+    DerivingVia
+    DuplicateRecordFields
+    EmptyCase
+    EmptyDataDecls
+    EmptyDataDeriving
+    ExistentialQuantification
+    ExplicitForAll
+    FlexibleContexts
+    FlexibleInstances
+    FunctionalDependencies
+    GADTSyntax
+    GeneralisedNewtypeDeriving
+    ImportQualifiedPost
+    InstanceSigs
+    KindSignatures
+    LambdaCase
+    MultiParamTypeClasses
+    MultiWayIf
+    NamedFieldPuns
+    NoStarIsType
+    NumericUnderscores
+    OverloadedLabels
+    OverloadedLists
+    OverloadedStrings
+    PackageImports
+    PartialTypeSignatures
+    PatternSynonyms
+    PolyKinds
+    PostfixOperators
+    QuasiQuotes
+    RankNTypes
+    ScopedTypeVariables
+    StandaloneDeriving
+    StandaloneKindSignatures
+    StrictData
+    TemplateHaskell
+    TupleSections
+    TypeApplications
+    TypeFamilies
+    TypeFamilyDependencies
+    TypeOperators
+    UndecidableInstances
+    ViewPatterns
