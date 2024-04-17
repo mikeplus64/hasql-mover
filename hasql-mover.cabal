@@ -11,20 +11,19 @@ build-type:      Simple
 extra-doc-files: CHANGELOG.md
 
 library
-  exposed-modules:
-    Hasql.Mover
-    Hasql.Mover.CLI
-    Hasql.Mover.Type
-
+  exposed-modules:    Hasql.Mover
   build-depends:
     , base
-    , bytestring
-    , crypton
     , hasql
     , hasql-th
     , hasql-transaction
+    , megaparsec
+    , PyF
     , sop-core
+    , template-haskell
     , text
+    , time
+    , transformers
 
   hs-source-dirs:     src
   default-language:   GHC2021
@@ -62,6 +61,7 @@ library
     MultiParamTypeClasses
     MultiWayIf
     NamedFieldPuns
+    NoFieldSelectors
     NoStarIsType
     NumericUnderscores
     OverloadedLabels
@@ -74,6 +74,7 @@ library
     PostfixOperators
     QuasiQuotes
     RankNTypes
+    RecordWildCards
     ScopedTypeVariables
     StandaloneDeriving
     StandaloneKindSignatures
@@ -86,3 +87,5 @@ library
     TypeOperators
     UndecidableInstances
     ViewPatterns
+
+  ghc-options:        -fno-warn-name-shadowing
