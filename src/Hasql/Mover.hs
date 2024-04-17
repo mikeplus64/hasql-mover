@@ -179,19 +179,6 @@ runPendingMigrations CheckedMigrations {pendings} = do
       |]
     pure ()
 
--- (`evalStateT` True) . traverse'_NP \m -> case m of
---   UpMigration _ -> pure m
---   DivergentMigration {oldUp, oldDown, executedAt} -> do
---     put False
---     pure m
---   PendingMigration @m -> do
---     canRun <- get
---     if canRun
---       then do
---         pure (UpMigration @m now)
---       else do
---         pure (PendingMigration @m)
-
 --------------------------------------------------------------------------------
 -- Declaring migrations
 
@@ -223,7 +210,7 @@ declareMigration =
           Right MigrationDesc {name, up, down} -> do
             qtype <- TH.newName (Text.unpack name)
             qconstr <- TH.newName (Text.unpack name)
-            dec <- TH.dataD (pure []) qtype [] Nothing [TH.normalC qconstr []] [TH.derivClause Nothing [[t|Show|]]]
+            dec <- TH.dataD (pure []) qtype [] Nothing [TH.normalC qconstr []] [TH.derivClause (Just TH.StockStrategy) [[t|Show|]]]
             inst <-
               [d|
                 instance Migration $(TH.conT qtype) where
