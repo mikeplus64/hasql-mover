@@ -1,5 +1,5 @@
 {
-  description = "dat: stuff";
+  description = "dev env for hasql-mover";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
