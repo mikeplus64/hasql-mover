@@ -61,30 +61,34 @@ prettyPending :: PendingMigration -> Doc
 prettyPending PendingMigration {migration} =
   R.vsep
     [ "Pending " <+> R.viaShow migration <+> R.line
-    , R.annotate (colorDull Green) "[up]"
-    , R.line
-    , R.pretty (up migration)
-    , R.line
+    , R.annotate (colorDull Green) "[up]" <+> R.line
+    , R.pretty (up migration) <+> R.line
     ]
 
 prettyUp :: UpMigration -> Doc
 prettyUp UpMigration {migration, executedAt} =
   R.vsep
     [ "Up " <+> R.viaShow migration <+> "executed at" <+> R.viaShow executedAt <+> R.line
-    , R.annotate (colorDull Green) "[up]"
-    , R.line
-    , R.pretty (up migration)
-    , R.line
+    , R.annotate (colorDull Green) "[up]" <+> R.line
+    , R.pretty (up migration) <+> R.line
+    ]
+
+prettyDivergent :: DivergentMigration -> Doc
+prettyDivergent DivergentMigration {migration, oldUp, executedAt} =
+  R.vsep
+    [ "Divergent " <+> R.viaShow migration <+> "executed at" <+> R.viaShow executedAt <+> R.line
+    , R.annotate (colorDull Green) "[up/new]" <+> R.line
+    , R.pretty (up migration) <+> R.line
+    , R.annotate (colorDull Green) "[up/old]" <+> R.line
+    , R.pretty oldUp <+> R.line
     ]
 
 prettyRollback :: (Migration m) => Rollback m -> Doc
 prettyRollback (Rollback m) =
   R.vsep
     [ "Rollback of " <+> R.viaShow m <+> R.line
-    , R.annotate (colorDull Green) "[down]"
-    , R.line
-    , R.pretty (down m)
-    , R.line
+    , R.annotate (colorDull Green) "[down]" <+> R.line
+    , R.pretty (down m) <+> R.line
     ]
 
 instance Show PendingMigration where
@@ -219,7 +223,7 @@ data MigrationCli = MigrationCli
 
 data MigrationCmd
   = MigrateUp
-  | MigrateDown
+  | MigrateDown {undoDivergents :: Bool, divergentUseOldDown :: Bool}
   | MigrateStatus
 
 hasqlMoverOpts :: O.Parser MigrationCli
@@ -229,10 +233,15 @@ hasqlMoverOpts =
     <*> O.subparser
       ( mconcat
           [ O.command "up" (O.info (pure MigrateUp) (O.progDesc "Perform any pending migrations"))
-          , O.command "down" (O.info (pure MigrateDown) (O.progDesc "Rollback the last migration"))
+          , O.command "down" (O.info migrateDown (O.progDesc "Rollback the last migration"))
           , O.command "status" (O.info (pure MigrateStatus) (O.progDesc "Check current status"))
           ]
       )
+  where
+    migrateDown =
+      MigrateDown
+        <$> O.switch (O.long "undo-diverging" <> O.short 'u' <> O.help "Can we undo a diverging migration?")
+        <*> O.switch (O.long "divergent-down-from-old" <> O.short 'o' <> O.help "Use the 'down' definition for a divergent migration from its original definition, when it was initially ran")
 
 hasqlMoverMain :: forall ms. (All Migration ms) => IO ()
 hasqlMoverMain = do
@@ -246,17 +255,18 @@ data MigrationError
   = MigrationCheckError !Sql.QueryError
   | MigrationUpError !PendingMigration !Sql.QueryError
   | MigrationDownError !UpMigration !Sql.QueryError
+  | MigrationDivergentDownError !DivergentMigration !Sql.QueryError
   | MigrationConnectError !Sql.ConnectionError
   | MigrationNothingToRollback
   | MigrationGotDivergents
   | MigrationException !E.SomeException
-  deriving stock (Show)
 
 prettyMigrationError :: MigrationError -> Doc
 prettyMigrationError = \case
   MigrationCheckError qe -> "Check error" <+> prettyQueryError qe
   MigrationUpError pending qe -> "Up error" <+> prettyPending pending <+> prettyQueryError qe
   MigrationDownError up qe -> "Down error" <+> prettyUp up <+> prettyQueryError qe
+  MigrationDivergentDownError up qe -> "Divergent down error" <+> prettyDivergent up <+> prettyQueryError qe
   MigrationConnectError connerr -> "Connection error" <+> R.viaShow connerr
   MigrationNothingToRollback -> "Nothing to roll back"
   MigrationGotDivergents -> "Divergent migrations"
@@ -304,11 +314,11 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
               RETURNING executed_at::timestamptz
             |]
 
-    runRollback :: (Migration m) => m -> IO (Either Sql.QueryError ())
-    runRollback m = do
+    runRollback :: (Migration m) => m -> Text -> IO (Either Sql.QueryError ())
+    runRollback m downSql = do
       putDoc (prettyRollback (Rollback m))
       (`Sql.run` db) $ Tx.transaction Tx.Serializable Tx.Write do
-        Tx.sql $ Text.encodeUtf8 $ down m
+        Tx.sql $ Text.encodeUtf8 downSql
         case cast m of
           Just BaseMigration -> pure ()
           Nothing -> Tx.statement (migrationName m) [Sql.resultlessStatement|DELETE FROM hasql_mover_migration WHERE name = ($1::text)|]
@@ -321,11 +331,15 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
             wrapQuery (MigrationUpError p) (runPending migration)
             liftIO . putDoc . ppStatus "New migrations status" =<< check
       | otherwise -> throwE MigrationGotDivergents
-    MigrateDown {} | null ups -> throwE MigrationNothingToRollback
-    MigrateDown -> do
-      case last ups of
-        u@UpMigration {migration} -> wrapQuery (MigrationDownError u) (runRollback migration)
-      liftIO . putDoc . ppStatus "New migrations status" =<< check
+    MigrateDown {undoDivergents, divergentUseOldDown}
+      | null ups && (null divergents && not undoDivergents) -> throwE MigrationNothingToRollback
+      | undoDivergents && not (null divergents)
+      , u@DivergentMigration {migration, oldDown} <- last divergents -> do
+          wrapQuery (MigrationDivergentDownError u) (runRollback migration (if divergentUseOldDown then oldDown else down migration))
+          throwE MigrationNothingToRollback
+      | u@UpMigration {migration} <- last ups -> do
+          wrapQuery (MigrationDownError u) (runRollback migration (down migration))
+          liftIO . putDoc . ppStatus "New migrations status" =<< check
   where
     ppStatus :: Text -> CheckedMigrations m -> Doc
     ppStatus title CheckedMigrations {ups, divergents, pendings} =
