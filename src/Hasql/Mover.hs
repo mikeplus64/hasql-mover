@@ -309,7 +309,9 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
       putDoc (prettyRollback (Rollback m))
       (`Sql.run` db) $ Tx.transaction Tx.Serializable Tx.Write do
         Tx.sql $ Text.encodeUtf8 $ down m
-        Tx.statement (migrationName m) [Sql.resultlessStatement|DELETE FROM hasql_mover_migration WHERE name = ($1::text)|]
+        case cast m of
+          Just BaseMigration -> pure ()
+          Nothing -> Tx.statement (migrationName m) [Sql.resultlessStatement|DELETE FROM hasql_mover_migration WHERE name = ($1::text)|]
 
   case cmd of
     MigrateStatus -> liftIO (putDoc (ppStatus "Current migrations status" checked))
