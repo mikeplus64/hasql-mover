@@ -14,10 +14,14 @@ library
   exposed-modules:    Hasql.Mover
   build-depends:
     , base
+    , bytestring
     , hasql
     , hasql-th
     , hasql-transaction
     , megaparsec
+    , optparse-applicative
+    , prettyprinter
+    , prettyprinter-ansi-terminal
     , PyF
     , sop-core
     , template-haskell
