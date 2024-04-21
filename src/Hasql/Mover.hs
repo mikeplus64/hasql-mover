@@ -207,7 +207,7 @@ hasqlMoverMain = do
   result <- performMigrations @ms cli
   case result of
     Right () -> pure ()
-    Left err -> print err
+    Left err -> putDoc (R.pretty err <+> R.softline)
 
 data MigrationError
   = MigrationCheckError !Sql.QueryError
@@ -217,6 +217,31 @@ data MigrationError
   | MigrationNothingToRollback
   | MigrationGotDivergents
   deriving stock (Show)
+
+instance R.Pretty MigrationError where
+  pretty = \case
+    MigrationCheckError qe -> ""
+    MigrationUpError pending qe -> ""
+    MigrationDownError up qe -> ""
+    MigrationConnectError connerr -> ""
+    MigrationNothingToRollback -> ""
+    MigrationGotDivergents -> ""
+    where
+      prettyQueryError (Sql.QueryError bs params cmderr) =
+        R.vsep
+          [ "QueryError for  " <+> R.align (R.vsep (map R.pretty (Text.lines (Text.decodeUtf8 bs))))
+          , " - Params: " <+> R.align (R.list (map R.pretty params))
+          , " - Command Error: " <+> R.align case cmderr of
+              Sql.ClientError mc -> "ClientError " <+> foldMap (R.pretty . Text.decodeUtf8) mc
+              Sql.ResultError re -> "ResultError " <+> prettyResultError re
+          ]
+      prettyResultError (Sql.ServerError code message details hint pos) =
+        R.vsep
+          [ "ServerError " <+> R.viaShow code <+> ": " <+> R.pretty (Text.decodeUtf8 message)
+          , foldMap ((<+>) "Details: " . R.align . R.pretty . Text.decodeUtf8) details
+          , foldMap ((<+>) "Hint: " . R.align . R.pretty . Text.decodeUtf8) hint
+          , foldMap ((<+>) "Position: " . R.align . R.pretty) pos
+          ]
 
 performMigrations
   :: forall migrations
