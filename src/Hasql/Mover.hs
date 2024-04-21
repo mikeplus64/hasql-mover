@@ -249,7 +249,7 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
           (migrationName m, up m, down m)
           [Sql.singletonStatement|
             INSERT INTO hasql_mover_migration (name, up, down) VALUES($1::text, $2::text, $3::text)
-            RETURNING time::timestamptz
+            RETURNING executed_at::timestamptz
           |]
 
     ppStatus CheckedMigrations {ups, divergents, pendings} =
