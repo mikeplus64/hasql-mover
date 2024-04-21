@@ -223,12 +223,27 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
   db <- errBy MigrationConnectError connect
   let check = errBy MigrationCheckError (Sql.run (checkMigrations @migrations) db)
   checked@CheckedMigrations {ups, divergents, pendings} <- check
+  let
+    runPending m = Tx.transaction Tx.Serializable Tx.Write case cast m of
+      Just BaseMigration -> do
+        Tx.sql $ Text.encodeUtf8 $ up BaseMigration
+        upPendingTx BaseMigration
+      Nothing -> do
+        upPendingTx m
+
+    upPendingTx m =
+      Tx.statement
+        (migrationName m, up m, down m)
+        [Sql.singletonStatement|
+            INSERT INTO hasql_mover_migration (name, up, down) VALUES($1::text, $2::text, $3::text)
+            RETURNING executed_at::timestamptz
+          |]
   case cmd of
     MigrateStatus -> liftIO (putDoc (ppStatus checked))
     MigrateUp
       | null divergents -> do
           forM_ pendings \p@PendingMigration {migration} -> do
-            errBy (MigrationUpError p) (Sql.run (runPending migration) db)
+            errBy (MigrationUpError p) (runPending migration `Sql.run` db)
             liftIO . putDoc . ppStatus =<< check
       | otherwise -> do
           liftIO . putDoc . ppStatus =<< check
@@ -240,18 +255,6 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
           errBy (MigrationDownError (PendingMigration rollback)) (Sql.run (runPending rollback) db)
       liftIO . putDoc . ppStatus =<< check
   where
-    runPending m = do
-      case cast m of
-        Just BaseMigration -> Tx.transaction Tx.Serializable Tx.Write $ Tx.sql $ Text.encodeUtf8 $ up BaseMigration
-        _ -> pure ()
-      Tx.transaction Tx.Serializable Tx.Write $
-        Tx.statement
-          (migrationName m, up m, down m)
-          [Sql.singletonStatement|
-            INSERT INTO hasql_mover_migration (name, up, down) VALUES($1::text, $2::text, $3::text)
-            RETURNING executed_at::timestamptz
-          |]
-
     ppStatus CheckedMigrations {ups, divergents, pendings} =
       R.vsep
         [ R.vsep (map ppUp ups)
