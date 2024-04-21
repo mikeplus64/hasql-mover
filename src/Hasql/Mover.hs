@@ -212,6 +212,7 @@ data MigrationError
   | MigrationDownError !PendingMigration !Sql.QueryError
   | MigrationConnectError !Sql.ConnectionError
   | MigrationNothingToRollback
+  | MigrationGotDivergents
   deriving stock (Show)
 
 performMigrations
@@ -239,28 +240,27 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
             RETURNING executed_at::timestamptz
           |]
   case cmd of
-    MigrateStatus -> liftIO (putDoc (ppStatus checked))
+    MigrateStatus -> liftIO (putDoc (ppStatus "Current migrations status" checked))
     MigrateUp
       | null divergents -> do
           forM_ pendings \p@PendingMigration {migration} -> do
             errBy (MigrationUpError p) (runPending migration `Sql.run` db)
-            liftIO . putDoc . ppStatus =<< check
-      | otherwise -> do
-          liftIO . putDoc . ppStatus =<< check
+            liftIO . putDoc . ppStatus "New migrations status" =<< check
+      | otherwise -> throwE MigrationGotDivergents
     MigrateDown {} | null ups -> throwE MigrationNothingToRollback
     MigrateDown -> do
       case last ups of
         UpMigration {migration} -> do
           let rollback = Rollback migration
           errBy (MigrationDownError (PendingMigration rollback)) (Sql.run (runPending rollback) db)
-      liftIO . putDoc . ppStatus =<< check
+      liftIO . putDoc . ppStatus "New migrations status" =<< check
   where
-    ppStatus CheckedMigrations {ups, divergents, pendings} =
+    ppStatus title CheckedMigrations {ups, divergents, pendings} =
       R.vsep
-        [ R.vsep (map ppUp ups)
+        [ fromString title
+        , R.vsep (map ppUp ups)
         , R.vsep (map ppDivergent divergents)
         , R.vsep (map ppPending pendings)
-        , R.hardline
         ]
 
     ppUp UpMigration {migration, executedAt} =
