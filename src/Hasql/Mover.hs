@@ -304,8 +304,8 @@ declareMigration =
               [d|
                 instance Migration $(TH.conT qtype) where
                   migration = $(TH.conE qconstr)
-                  up = $(TH.lift (Text.unpack up))
-                  down = $(TH.lift (Text.unpack down))
+                  up _ = $(TH.lift (Text.unpack up))
+                  down _ = $(TH.lift (Text.unpack down))
                 |]
             pure (dec : inst)
     }
