@@ -40,7 +40,7 @@ import Language.Haskell.TH.Syntax qualified as TH
 import Options.Applicative qualified as O
 import Prettyprinter ((<+>))
 import Prettyprinter qualified as R
-import Prettyprinter.Render.Terminal (Color (..), color, colorDull, putDoc)
+import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, colorDull, putDoc)
 import PyF (strTrim)
 import Text.Megaparsec qualified as M
 import Text.Megaparsec.Char qualified as M
@@ -55,27 +55,37 @@ data UpMigration = forall m. (Migration m) => UpMigration {migration :: m, execu
 data DivergentMigration = forall m. (Migration m) => DivergentMigration {migration :: m, oldUp, oldDown :: Text, executedAt :: UTCTime}
 data UnknownMigration m = (Migration m) => UnknownMigration m
 
-instance R.Pretty PendingMigration where
-  pretty PendingMigration {migration} =
-    R.vsep
-      [ "Pending " <+> R.viaShow migration
-      , "SQL: " <+> R.pretty (up migration)
-      ]
+type Doc = R.Doc AnsiStyle
 
-instance R.Pretty UpMigration where
-  pretty UpMigration {migration, executedAt} =
-    R.vsep
-      [ "Up " <+> R.viaShow migration
-      , "Executed at: " <+> R.viaShow executedAt
-      , "SQL: " <+> R.pretty (up migration)
-      ]
+prettyPending :: PendingMigration -> Doc
+prettyPending PendingMigration {migration} =
+  R.vsep
+    [ "Pending " <+> R.viaShow migration
+    , R.line
+    , R.annotate (colorDull Green) "[up]"
+    , R.pretty (up migration)
+    , R.softline
+    ]
 
-instance (Migration m) => R.Pretty (Rollback m) where
-  pretty (Rollback m) =
-    R.vsep
-      [ "PendingMigration " <+> R.viaShow m
-      , "SQL: " <+> R.pretty (down m)
-      ]
+prettyUp :: UpMigration -> Doc
+prettyUp UpMigration {migration, executedAt} =
+  R.vsep
+    [ "Up " <+> R.viaShow migration <+> "executed at" <+> R.viaShow executedAt
+    , R.line
+    , R.annotate (colorDull Green) "[up]"
+    , R.pretty (up migration)
+    , R.softline
+    ]
+
+prettyRollback :: (Migration m) => Rollback m -> Doc
+prettyRollback (Rollback m) =
+  R.vsep
+    [ "Rollback of " <+> R.viaShow m
+    , R.line
+    , R.annotate (colorDull Green) "[down]"
+    , R.pretty (down m)
+    , R.softline
+    ]
 
 instance Show PendingMigration where
   showsPrec p (PendingMigration m) = showParen (p > 10) (showString "PendingMigration " . showsPrec 11 m)
@@ -230,7 +240,7 @@ hasqlMoverMain = do
   result <- performMigrations @ms cli
   case result of
     Right () -> putStrLn "Done"
-    Left err -> putDoc (R.pretty err <+> R.softline)
+    Left err -> putDoc (prettyMigrationError err <+> R.softline)
 
 data MigrationError
   = MigrationCheckError !Sql.QueryError
@@ -242,34 +252,34 @@ data MigrationError
   | MigrationException !E.SomeException
   deriving stock (Show)
 
-instance R.Pretty MigrationError where
-  pretty = \case
-    MigrationCheckError qe -> "Check error" <+> prettyQueryError qe
-    MigrationUpError pending qe -> "Up error" <+> R.pretty pending <+> prettyQueryError qe
-    MigrationDownError up qe -> "Down error" <+> R.pretty up <+> prettyQueryError qe
-    MigrationConnectError connerr -> "Connection error" <+> R.viaShow connerr
-    MigrationNothingToRollback -> "Nothing to roll back"
-    MigrationGotDivergents -> "Divergent migrations"
-    MigrationException se -> R.viaShow se
-    where
-      prettyQueryError (Sql.QueryError bs params cmderr) =
+prettyMigrationError :: MigrationError -> Doc
+prettyMigrationError = \case
+  MigrationCheckError qe -> "Check error" <+> prettyQueryError qe
+  MigrationUpError pending qe -> "Up error" <+> prettyPending pending <+> prettyQueryError qe
+  MigrationDownError up qe -> "Down error" <+> prettyUp up <+> prettyQueryError qe
+  MigrationConnectError connerr -> "Connection error" <+> R.viaShow connerr
+  MigrationNothingToRollback -> "Nothing to roll back"
+  MigrationGotDivergents -> "Divergent migrations"
+  MigrationException se -> R.viaShow se
+  where
+    prettyQueryError (Sql.QueryError bs params cmderr) =
+      R.vsep
+        [ "QueryError for  " <+> R.align (R.vsep (map R.pretty (Text.lines (Text.decodeUtf8 bs))))
+        , " - Params: " <+> R.align (R.list (map R.pretty params))
+        , " - Command Error: " <+> R.align case cmderr of
+            Sql.ClientError mc -> "ClientError " <+> foldMap (R.pretty . Text.decodeUtf8) mc
+            Sql.ResultError re -> "ResultError " <+> prettyResultError re
+        ]
+    prettyResultError = \case
+      Sql.ServerError code message details hint pos ->
         R.vsep
-          [ "QueryError for  " <+> R.align (R.vsep (map R.pretty (Text.lines (Text.decodeUtf8 bs))))
-          , " - Params: " <+> R.align (R.list (map R.pretty params))
-          , " - Command Error: " <+> R.align case cmderr of
-              Sql.ClientError mc -> "ClientError " <+> foldMap (R.pretty . Text.decodeUtf8) mc
-              Sql.ResultError re -> "ResultError " <+> prettyResultError re
+          [ "ServerError " <+> R.viaShow code <+> ": " <+> R.pretty (Text.decodeUtf8 message)
+          , foldMap ((<+>) "Details: " . R.align . R.pretty . Text.decodeUtf8) details
+          , foldMap ((<+>) "Hint: " . R.align . R.pretty . Text.decodeUtf8) hint
+          , foldMap ((<+>) "Position: " . R.align . R.pretty) pos
           ]
-      prettyResultError = \case
-        Sql.ServerError code message details hint pos ->
-          R.vsep
-            [ "ServerError " <+> R.viaShow code <+> ": " <+> R.pretty (Text.decodeUtf8 message)
-            , foldMap ((<+>) "Details: " . R.align . R.pretty . Text.decodeUtf8) details
-            , foldMap ((<+>) "Hint: " . R.align . R.pretty . Text.decodeUtf8) hint
-            , foldMap ((<+>) "Position: " . R.align . R.pretty) pos
-            ]
-        Sql.UnexpectedResult err -> R.pretty err
-        err -> R.viaShow err
+      Sql.UnexpectedResult err -> R.pretty err
+      err -> R.viaShow err
 
 performMigrations
   :: forall migrations
@@ -284,7 +294,7 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
   let
     runPending :: (Migration m) => m -> IO (Either Sql.QueryError UTCTime)
     runPending m = do
-      putDoc (R.pretty (PendingMigration m))
+      putDoc (prettyPending (PendingMigration m))
       (`Sql.run` db) $ Tx.transaction Tx.Serializable Tx.Write do
         Tx.sql $ Text.encodeUtf8 $ up m
         Tx.statement
@@ -296,7 +306,7 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
 
     runRollback :: (Migration m) => m -> IO (Either Sql.QueryError ())
     runRollback m = do
-      putDoc (R.pretty (Rollback m))
+      putDoc (prettyRollback (Rollback m))
       (`Sql.run` db) $ Tx.transaction Tx.Serializable Tx.Write do
         Tx.sql $ Text.encodeUtf8 $ down m
         Tx.statement (migrationName m) [Sql.resultlessStatement|DELETE FROM hasql_mover_migration WHERE name = ($1::text)|]
