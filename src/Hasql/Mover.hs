@@ -14,7 +14,7 @@ module Hasql.Mover (
 import Control.Monad (forM_, void)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.Except (ExceptT (..), runExceptT, withExceptT)
+import Control.Monad.Trans.Except (ExceptT (..), runExceptT, throwE, withExceptT)
 import Control.Monad.Trans.State.Strict (StateT (..), execStateT, gets, modify')
 import Data.ByteString (ByteString)
 import Data.Char (isSpace)
@@ -180,8 +180,7 @@ data MigrationCli = MigrationCli
 
 data MigrationCmd
   = MigrateUp
-  | MigrateDown {useNewDownDefinition :: Bool}
-  | MigrateRedo
+  | MigrateDown
   | MigrateStatus
 
 migrationCli :: O.Parser MigrationCli
@@ -190,23 +189,18 @@ migrationCli =
     <$> (Sql.acquire . Text.encodeUtf8 . Text.pack <$> O.strOption (O.long "db" <> O.metavar "DB"))
     <*> O.subparser
       ( mconcat
-          [ O.command "up" (O.info migrateUp (O.progDesc "Perform any pending migrations"))
-          , O.command "down" (O.info migrateDown (O.progDesc "Rollback the last migration"))
-          , O.command "redo" (O.info migrateDown (O.progDesc "Redo the last migration"))
-          , O.command "status" (O.info migrateDown (O.progDesc "Check current status"))
+          [ O.command "up" (O.info (pure MigrateUp) (O.progDesc "Perform any pending migrations"))
+          , O.command "down" (O.info (pure MigrateDown) (O.progDesc "Rollback the last migration"))
+          , O.command "status" (O.info (pure MigrateStatus) (O.progDesc "Check current status"))
           ]
       )
-  where
-    migrateUp, migrateDown, migrateRedo, migrateStatus :: O.Parser MigrationCmd
-    migrateUp = pure MigrateUp
-    migrateDown = MigrateDown <$> O.switch (O.long "useNewDownDefinition" <> O.help "Use the definition of 'down' defined in code rather than stored currently in the migration table in database")
-    migrateRedo = pure MigrateRedo
-    migrateStatus = pure MigrateStatus
 
 data MigrationError
   = MigrationCheckError !Sql.QueryError
   | MigrationUpError !PendingMigration !Sql.QueryError
+  | MigrationDownError !PendingMigration !Sql.QueryError
   | MigrationConnectError !Sql.ConnectionError
+  | MigrationNothingToRollback
 
 performMigrations
   :: forall migrations
@@ -226,7 +220,13 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
             liftIO . putDoc . ppStatus =<< check
       | otherwise -> do
           liftIO . putDoc . ppStatus =<< check
-    _ -> pure ()
+    MigrateDown {} | null ups -> throwE MigrationNothingToRollback
+    MigrateDown -> do
+      case last ups of
+        UpMigration {migration} -> do
+          let rollback = Rollback migration
+          errBy (MigrationDownError (PendingMigration rollback)) (Sql.run (runPending rollback) db)
+      liftIO . putDoc . ppStatus =<< check
   where
     runPending m = do
       case cast m of
