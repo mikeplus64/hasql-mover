@@ -57,6 +57,9 @@ data UnknownMigration m = (Migration m) => UnknownMigration m
 instance Show PendingMigration where
   showsPrec p (PendingMigration m) = showParen (p > 10) (showString "PendingMigration " . showsPrec 11 m)
 
+instance Show UpMigration where
+  showsPrec p (UpMigration m e) = showParen (p > 10) (showString "UpMigration " . showsPrec 11 e . showString " " . showsPrec 11 m)
+
 data CheckedMigrations names = CheckedMigrations
   { ups :: [UpMigration]
   , divergents :: [DivergentMigration]
@@ -209,7 +212,7 @@ hasqlMoverMain = do
 data MigrationError
   = MigrationCheckError !Sql.QueryError
   | MigrationUpError !PendingMigration !Sql.QueryError
-  | MigrationDownError !PendingMigration !Sql.QueryError
+  | MigrationDownError !UpMigration !Sql.QueryError
   | MigrationConnectError !Sql.ConnectionError
   | MigrationNothingToRollback
   | MigrationGotDivergents
@@ -227,7 +230,11 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
   let
     runPending :: (Migration m) => m -> IO (Either Sql.QueryError UTCTime)
     runPending m = do
-      putDoc ("Running migration " <+> R.viaShow m <+> R.line)
+      putDoc $
+        R.vsep
+          [ "Running migration " <+> R.viaShow m <+> R.line
+          , "SQL: " <+> R.align (R.pretty (up m))
+          ]
       (`Sql.run` db) $ Tx.transaction Tx.Serializable Tx.Write do
         Tx.sql $ Text.encodeUtf8 $ up BaseMigration
         Tx.statement
@@ -236,6 +243,18 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
               INSERT INTO hasql_mover_migration (name, up, down) VALUES($1::text, $2::text, $3::text)
               RETURNING executed_at::timestamptz
             |]
+
+    runRollback :: (Migration m) => m -> IO (Either Sql.QueryError ())
+    runRollback m = do
+      putDoc $
+        R.vsep
+          [ "Undoing migration " <+> R.viaShow m <+> R.line
+          , "SQL: " <+> R.align (R.pretty (up m))
+          ]
+      (`Sql.run` db) $ Tx.transaction Tx.Serializable Tx.Write do
+        Tx.sql $ Text.encodeUtf8 $ down m
+        Tx.statement (migrationName m) [Sql.resultlessStatement|DELETE FROM hasql_mover_migration WHERE name = ($1::text)|]
+
   case cmd of
     MigrateStatus -> liftIO (putDoc (ppStatus "Current migrations status" checked))
     MigrateUp
@@ -247,9 +266,7 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
     MigrateDown {} | null ups -> throwE MigrationNothingToRollback
     MigrateDown -> do
       case last ups of
-        UpMigration {migration} -> do
-          let rollback = Rollback migration
-          errBy (MigrationDownError (PendingMigration rollback)) (runPending rollback)
+        u@UpMigration {migration} -> errBy (MigrationDownError u) (runRollback migration)
       liftIO . putDoc . ppStatus "New migrations status" =<< check
   where
     ppStatus title CheckedMigrations {ups, divergents, pendings} =
