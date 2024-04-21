@@ -60,31 +60,31 @@ type Doc = R.Doc AnsiStyle
 prettyPending :: PendingMigration -> Doc
 prettyPending PendingMigration {migration} =
   R.vsep
-    [ "Pending " <+> R.viaShow migration
-    , R.line
+    [ "Pending " <+> R.viaShow migration <+> R.line
     , R.annotate (colorDull Green) "[up]"
+    , R.line
     , R.pretty (up migration)
-    , R.softline
+    , R.line
     ]
 
 prettyUp :: UpMigration -> Doc
 prettyUp UpMigration {migration, executedAt} =
   R.vsep
-    [ "Up " <+> R.viaShow migration <+> "executed at" <+> R.viaShow executedAt
-    , R.line
+    [ "Up " <+> R.viaShow migration <+> "executed at" <+> R.viaShow executedAt <+> R.line
     , R.annotate (colorDull Green) "[up]"
+    , R.line
     , R.pretty (up migration)
-    , R.softline
+    , R.line
     ]
 
 prettyRollback :: (Migration m) => Rollback m -> Doc
 prettyRollback (Rollback m) =
   R.vsep
-    [ "Rollback of " <+> R.viaShow m
-    , R.line
+    [ "Rollback of " <+> R.viaShow m <+> R.line
     , R.annotate (colorDull Green) "[down]"
+    , R.line
     , R.pretty (down m)
-    , R.softline
+    , R.line
     ]
 
 instance Show PendingMigration where
@@ -325,9 +325,10 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
         u@UpMigration {migration} -> wrapQuery (MigrationDownError u) (runRollback migration)
       liftIO . putDoc . ppStatus "New migrations status" =<< check
   where
+    ppStatus :: Text -> CheckedMigrations m -> Doc
     ppStatus title CheckedMigrations {ups, divergents, pendings} =
       R.vsep
-        [ fromString title
+        [ R.pretty title
         , R.vsep $
             concat @[]
               [ map ppUp ups
