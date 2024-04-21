@@ -225,26 +225,23 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
   let check = errBy MigrationCheckError (Sql.run (checkMigrations @migrations) db)
   checked@CheckedMigrations {ups, divergents, pendings} <- check
   let
-    runPending m = Tx.transaction Tx.Serializable Tx.Write case cast m of
-      Just BaseMigration -> do
+    runPending :: (Migration m) => m -> IO (Either Sql.QueryError UTCTime)
+    runPending m = do
+      putDoc ("Running migration " <+> R.viaShow m <+> R.line)
+      (`Sql.run` db) $ Tx.transaction Tx.Serializable Tx.Write do
         Tx.sql $ Text.encodeUtf8 $ up BaseMigration
-        upPendingTx BaseMigration
-      Nothing -> do
-        upPendingTx m
-
-    upPendingTx m =
-      Tx.statement
-        (migrationName m, up m, down m)
-        [Sql.singletonStatement|
-            INSERT INTO hasql_mover_migration (name, up, down) VALUES($1::text, $2::text, $3::text)
-            RETURNING executed_at::timestamptz
-          |]
+        Tx.statement
+          (migrationName m, up m, down m)
+          [Sql.singletonStatement|
+              INSERT INTO hasql_mover_migration (name, up, down) VALUES($1::text, $2::text, $3::text)
+              RETURNING executed_at::timestamptz
+            |]
   case cmd of
     MigrateStatus -> liftIO (putDoc (ppStatus "Current migrations status" checked))
     MigrateUp
       | null divergents -> do
           forM_ pendings \p@PendingMigration {migration} -> do
-            errBy (MigrationUpError p) (runPending migration `Sql.run` db)
+            errBy (MigrationUpError p) (runPending migration)
             liftIO . putDoc . ppStatus "New migrations status" =<< check
       | otherwise -> throwE MigrationGotDivergents
     MigrateDown {} | null ups -> throwE MigrationNothingToRollback
@@ -252,7 +249,7 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
       case last ups of
         UpMigration {migration} -> do
           let rollback = Rollback migration
-          errBy (MigrationDownError (PendingMigration rollback)) (Sql.run (runPending rollback) db)
+          errBy (MigrationDownError (PendingMigration rollback)) (runPending rollback)
       liftIO . putDoc . ppStatus "New migrations status" =<< check
   where
     ppStatus title CheckedMigrations {ups, divergents, pendings} =
