@@ -54,6 +54,20 @@ data UpMigration = forall m. (Migration m) => UpMigration {migration :: m, execu
 data DivergentMigration = forall m. (Migration m) => DivergentMigration {migration :: m, oldUp, oldDown :: Text, executedAt :: UTCTime}
 data UnknownMigration m = (Migration m) => UnknownMigration m
 
+instance R.Pretty PendingMigration where
+  pretty PendingMigration {migration} =
+    R.vsep
+      [ "PendingMigration " <+> R.viaShow migration
+      , "SQL: " <+> R.pretty (up migration)
+      ]
+
+instance (Migration m) => R.Pretty (Rollback m) where
+  pretty (Rollback m) =
+    R.vsep
+      [ "PendingMigration " <+> R.viaShow m
+      , "SQL: " <+> R.pretty (down m)
+      ]
+
 instance Show PendingMigration where
   showsPrec p (PendingMigration m) = showParen (p > 10) (showString "PendingMigration " . showsPrec 11 m)
 
@@ -255,29 +269,19 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
   let
     runPending :: (Migration m) => m -> IO (Either Sql.QueryError UTCTime)
     runPending m = do
-      putDoc $
-        R.vsep
-          [ "Running migration " <+> R.viaShow m
-          , "SQL: " <+> R.align (R.pretty (up m))
-          , ""
-          ]
+      putDoc (R.pretty (PendingMigration m))
       (`Sql.run` db) $ Tx.transaction Tx.Serializable Tx.Write do
         Tx.sql $ Text.encodeUtf8 $ up m
         Tx.statement
           (migrationName m, up m, down m)
           [Sql.singletonStatement|
-              INSERT INTO hasql_mover_migration (name, up, down) VALUES($1::text, $2::text, $3::text)
-              RETURNING executed_at::timestamptz
-            |]
+            INSERT INTO hasql_mover_migration (name, up, down) VALUES($1::text, $2::text, $3::text)
+            RETURNING executed_at::timestamptz
+          |]
 
     runRollback :: (Migration m) => m -> IO (Either Sql.QueryError ())
     runRollback m = do
-      putDoc $
-        R.vsep
-          [ "Undoing migration " <+> R.viaShow m
-          , "SQL: " <+> R.align (R.pretty (down m))
-          , ""
-          ]
+      putDoc (R.pretty (Rollback m))
       (`Sql.run` db) $ Tx.transaction Tx.Serializable Tx.Write do
         Tx.sql $ Text.encodeUtf8 $ down m
         Tx.statement (migrationName m) [Sql.resultlessStatement|DELETE FROM hasql_mover_migration WHERE name = ($1::text)|]
