@@ -206,7 +206,7 @@ hasqlMoverMain = do
   cli <- O.execParser (O.info hasqlMoverOpts mempty)
   result <- performMigrations @ms cli
   case result of
-    Right () -> pure ()
+    Right () -> putStrLn "Done"
     Left err -> putDoc (R.pretty err <+> R.softline)
 
 data MigrationError
