@@ -274,9 +274,12 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
     ppStatus title CheckedMigrations {ups, divergents, pendings} =
       R.vsep
         [ fromString title
-        , R.vsep (map ppUp ups)
-        , R.vsep (map ppDivergent divergents)
-        , R.vsep (map ppPending pendings)
+        , R.vsep $
+            concat @[]
+              [ map ppUp ups
+              , map ppDivergent divergents
+              , map ppPending pendings
+              ]
         ]
 
     ppUp UpMigration {migration, executedAt} =
