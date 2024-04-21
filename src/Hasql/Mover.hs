@@ -257,6 +257,7 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
         [ foldMap ppUp ups
         , foldMap ppDivergent divergents
         , foldMap ppPending pendings
+        , R.hardline
         ]
 
     ppUp UpMigration {migration, executedAt} =
