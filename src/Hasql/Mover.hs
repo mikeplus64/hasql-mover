@@ -11,6 +11,7 @@ module Hasql.Mover (
   hasqlMoverOpts,
 ) where
 
+import Control.Exception qualified as E
 import Control.Monad (forM_, void)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Trans.Class (lift)
@@ -57,7 +58,15 @@ data UnknownMigration m = (Migration m) => UnknownMigration m
 instance R.Pretty PendingMigration where
   pretty PendingMigration {migration} =
     R.vsep
-      [ "PendingMigration " <+> R.viaShow migration
+      [ "Pending " <+> R.viaShow migration
+      , "SQL: " <+> R.pretty (up migration)
+      ]
+
+instance R.Pretty UpMigration where
+  pretty UpMigration {migration, executedAt} =
+    R.vsep
+      [ "Up " <+> R.viaShow migration
+      , "Executed at: " <+> R.viaShow executedAt
       , "SQL: " <+> R.pretty (up migration)
       ]
 
@@ -230,16 +239,18 @@ data MigrationError
   | MigrationConnectError !Sql.ConnectionError
   | MigrationNothingToRollback
   | MigrationGotDivergents
+  | MigrationException !E.SomeException
   deriving stock (Show)
 
 instance R.Pretty MigrationError where
   pretty = \case
-    MigrationCheckError qe -> ""
-    MigrationUpError pending qe -> ""
-    MigrationDownError up qe -> ""
-    MigrationConnectError connerr -> ""
-    MigrationNothingToRollback -> ""
-    MigrationGotDivergents -> ""
+    MigrationCheckError qe -> "Check error" <+> prettyQueryError qe
+    MigrationUpError pending qe -> "Up error" <+> R.pretty pending <+> prettyQueryError qe
+    MigrationDownError up qe -> "Down error" <+> R.pretty up <+> prettyQueryError qe
+    MigrationConnectError connerr -> "Connection error" <+> R.viaShow connerr
+    MigrationNothingToRollback -> "Nothing to roll back"
+    MigrationGotDivergents -> "Divergent migrations"
+    MigrationException se -> R.viaShow se
     where
       prettyQueryError (Sql.QueryError bs params cmderr) =
         R.vsep
@@ -249,13 +260,16 @@ instance R.Pretty MigrationError where
               Sql.ClientError mc -> "ClientError " <+> foldMap (R.pretty . Text.decodeUtf8) mc
               Sql.ResultError re -> "ResultError " <+> prettyResultError re
           ]
-      prettyResultError (Sql.ServerError code message details hint pos) =
-        R.vsep
-          [ "ServerError " <+> R.viaShow code <+> ": " <+> R.pretty (Text.decodeUtf8 message)
-          , foldMap ((<+>) "Details: " . R.align . R.pretty . Text.decodeUtf8) details
-          , foldMap ((<+>) "Hint: " . R.align . R.pretty . Text.decodeUtf8) hint
-          , foldMap ((<+>) "Position: " . R.align . R.pretty) pos
-          ]
+      prettyResultError = \case
+        Sql.ServerError code message details hint pos ->
+          R.vsep
+            [ "ServerError " <+> R.viaShow code <+> ": " <+> R.pretty (Text.decodeUtf8 message)
+            , foldMap ((<+>) "Details: " . R.align . R.pretty . Text.decodeUtf8) details
+            , foldMap ((<+>) "Hint: " . R.align . R.pretty . Text.decodeUtf8) hint
+            , foldMap ((<+>) "Position: " . R.align . R.pretty) pos
+            ]
+        Sql.UnexpectedResult err -> R.pretty err
+        err -> R.viaShow err
 
 performMigrations
   :: forall migrations
@@ -266,6 +280,7 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
   db <- errBy MigrationConnectError connect
   let check = errBy MigrationCheckError (Sql.run (checkMigrations @migrations) db)
   checked@CheckedMigrations {ups, divergents, pendings} <- check
+
   let
     runPending :: (Migration m) => m -> IO (Either Sql.QueryError UTCTime)
     runPending m = do
@@ -275,9 +290,9 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
         Tx.statement
           (migrationName m, up m, down m)
           [Sql.singletonStatement|
-            INSERT INTO hasql_mover_migration (name, up, down) VALUES($1::text, $2::text, $3::text)
-            RETURNING executed_at::timestamptz
-          |]
+              INSERT INTO hasql_mover_migration (name, up, down) VALUES($1::text, $2::text, $3::text)
+              RETURNING executed_at::timestamptz
+            |]
 
     runRollback :: (Migration m) => m -> IO (Either Sql.QueryError ())
     runRollback m = do
@@ -291,13 +306,13 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
     MigrateUp
       | null divergents -> do
           forM_ pendings \p@PendingMigration {migration} -> do
-            errBy (MigrationUpError p) (runPending migration)
+            wrapQuery (MigrationUpError p) (runPending migration)
             liftIO . putDoc . ppStatus "New migrations status" =<< check
       | otherwise -> throwE MigrationGotDivergents
     MigrateDown {} | null ups -> throwE MigrationNothingToRollback
     MigrateDown -> do
       case last ups of
-        u@UpMigration {migration} -> errBy (MigrationDownError u) (runRollback migration)
+        u@UpMigration {migration} -> wrapQuery (MigrationDownError u) (runRollback migration)
       liftIO . putDoc . ppStatus "New migrations status" =<< check
   where
     ppStatus title CheckedMigrations {ups, divergents, pendings} =
@@ -320,6 +335,12 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
       R.annotate (colorDull White) $ R.hsep ["[ PENDING ]", R.align (R.viaShow migration)]
 
     errBy f a = withExceptT f (ExceptT a)
+    wrapQuery f p = do
+      r <- liftIO (E.try @E.SomeException p)
+      case r of
+        Left se -> throwE (MigrationException se)
+        Right (Left e) -> throwE (f e)
+        Right (Right a) -> pure a
 
 --------------------------------------------------------------------------------
 -- Declaring migrations
