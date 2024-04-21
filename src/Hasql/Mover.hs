@@ -4,11 +4,11 @@ module Hasql.Mover (
   -- * Declaration
   declareMigration,
 
-  -- * Rollbacks
-  Rollback (..),
-
   -- * Checking and running migrations
-  performMigrations,
+  MigrationCli (..),
+  MigrationError (..),
+  hasqlMoverMain,
+  hasqlMoverOpts,
 ) where
 
 import Control.Monad (forM_, void)
@@ -53,6 +53,9 @@ data PendingMigration = forall m. (Migration m) => PendingMigration {migration :
 data UpMigration = forall m. (Migration m) => UpMigration {migration :: m, executedAt :: UTCTime}
 data DivergentMigration = forall m. (Migration m) => DivergentMigration {migration :: m, oldUp, oldDown :: Text, executedAt :: UTCTime}
 data UnknownMigration m = (Migration m) => UnknownMigration m
+
+instance Show PendingMigration where
+  showsPrec p (PendingMigration m) = showParen (p > 10) (showString "PendingMigration " . showsPrec 11 m)
 
 data CheckedMigrations names = CheckedMigrations
   { ups :: [UpMigration]
@@ -183,8 +186,8 @@ data MigrationCmd
   | MigrateDown
   | MigrateStatus
 
-migrationCli :: O.Parser MigrationCli
-migrationCli =
+hasqlMoverOpts :: O.Parser MigrationCli
+hasqlMoverOpts =
   MigrationCli
     <$> (Sql.acquire . Text.encodeUtf8 . Text.pack <$> O.strOption (O.long "db" <> O.metavar "DB"))
     <*> O.subparser
@@ -195,12 +198,21 @@ migrationCli =
           ]
       )
 
+hasqlMoverMain :: forall ms. (All Migration ms) => IO ()
+hasqlMoverMain = do
+  cli <- O.execParser (O.info hasqlMoverOpts mempty)
+  result <- performMigrations @ms cli
+  case result of
+    Right () -> pure ()
+    Left err -> print err
+
 data MigrationError
   = MigrationCheckError !Sql.QueryError
   | MigrationUpError !PendingMigration !Sql.QueryError
   | MigrationDownError !PendingMigration !Sql.QueryError
   | MigrationConnectError !Sql.ConnectionError
   | MigrationNothingToRollback
+  deriving stock (Show)
 
 performMigrations
   :: forall migrations
