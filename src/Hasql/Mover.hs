@@ -254,9 +254,9 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
 
     ppStatus CheckedMigrations {ups, divergents, pendings} =
       R.vsep
-        [ foldMap ppUp ups
-        , foldMap ppDivergent divergents
-        , foldMap ppPending pendings
+        [ R.vsep (map ppUp ups)
+        , R.vsep (map ppDivergent divergents)
+        , R.vsep (map ppPending pendings)
         , R.hardline
         ]
 
