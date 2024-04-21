@@ -280,6 +280,7 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
               , map ppDivergent divergents
               , map ppPending pendings
               ]
+        , R.softline
         ]
 
     ppUp UpMigration {migration, executedAt} =
