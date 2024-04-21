@@ -232,8 +232,9 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
     runPending m = do
       putDoc $
         R.vsep
-          [ "Running migration " <+> R.viaShow m <+> R.line
+          [ "Running migration " <+> R.viaShow m
           , "SQL: " <+> R.align (R.pretty (up m))
+          , ""
           ]
       (`Sql.run` db) $ Tx.transaction Tx.Serializable Tx.Write do
         Tx.sql $ Text.encodeUtf8 $ up BaseMigration
@@ -248,8 +249,9 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
     runRollback m = do
       putDoc $
         R.vsep
-          [ "Undoing migration " <+> R.viaShow m <+> R.line
-          , "SQL: " <+> R.align (R.pretty (up m))
+          [ "Undoing migration " <+> R.viaShow m
+          , "SQL: " <+> R.align (R.pretty (down m))
+          , ""
           ]
       (`Sql.run` db) $ Tx.transaction Tx.Serializable Tx.Write do
         Tx.sql $ Text.encodeUtf8 $ down m
