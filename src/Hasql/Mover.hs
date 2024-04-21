@@ -52,7 +52,7 @@ import Text.Megaparsec.Char.Lexer qualified as L
 data PendingMigration = forall m. (Migration m) => PendingMigration {migration :: m}
 data UpMigration = forall m. (Migration m) => UpMigration {migration :: m, executedAt :: UTCTime}
 data DivergentMigration = forall m. (Migration m) => DivergentMigration {migration :: m, oldUp, oldDown :: Text, executedAt :: UTCTime}
-data UnknownMigration m = (Migration m) => UnknownMigration
+data UnknownMigration m = (Migration m) => UnknownMigration m
 
 data CheckedMigrations names = CheckedMigrations
   { ups :: [UpMigration]
@@ -62,11 +62,11 @@ data CheckedMigrations names = CheckedMigrations
 
 class (Typeable a, Show a) => Migration a where
   migration :: a
-  up :: Text
-  down :: Text
+  up :: a -> Text
+  down :: a -> Text
 
-migrationName :: forall a. (Migration a) => Text
-migrationName = Text.pack (show (migration @a))
+migrationName :: (Migration a) => a -> Text
+migrationName = Text.pack . show
 
 --------------------------------------------------------------------------------
 -- The base migration
@@ -76,7 +76,7 @@ data BaseMigration = BaseMigration
 
 instance Migration BaseMigration where
   migration = BaseMigration
-  up =
+  up _ =
     [strTrim|
     CREATE TABLE hasql_mover_migration (
       id serial NOT NULL,
@@ -85,15 +85,15 @@ instance Migration BaseMigration where
       down text NOT NULL,
       executed_at timestamptz NOT NULL DEFAULT now()
     )|]
-  down = [strTrim|DROP TABLE hasql_mover_migration CASCADE|]
+  down _ = [strTrim|DROP TABLE hasql_mover_migration CASCADE|]
 
 newtype Rollback m = Rollback m
   deriving stock (Show)
 
 instance (Migration m) => Migration (Rollback m) where
   migration = Rollback migration
-  up = down @m
-  down = up @m
+  up (Rollback m) = down m
+  down (Rollback m) = up m
 
 --------------------------------------------------------------------------------
 
@@ -126,26 +126,26 @@ checkMigrations =
     checkBaseMigration = do
       haveBaseTable <- lift $ Tx.statement () [Sql.singletonStatement|SELECT (to_regclass('hasql_mover_migration') IS NOT NULL)::boolean|]
       if haveBaseTable
-        then checkMigration @BaseMigration
+        then checkMigration BaseMigration
         else do
           modify' \s -> s {haveBaseTable = False}
-          addPending @BaseMigration
+          addPending BaseMigration
 
     checkOthers :: CheckM ()
     checkOthers =
       traverse__NP
-        (\(UnknownMigration @m) -> checkMigration @m)
-        (cpure_NP (Proxy @Migration) UnknownMigration :: NP UnknownMigration migrations)
+        (\(UnknownMigration m) -> checkMigration m)
+        (cpure_NP (Proxy @Migration) (UnknownMigration migration) :: NP UnknownMigration migrations)
 
-    checkMigration :: forall m. (Migration m) => CheckM ()
-    checkMigration = do
+    checkMigration :: (Migration m) => m -> CheckM ()
+    checkMigration m = do
       canContinue <- gets \CheckState {haveBaseTable, divergents} -> haveBaseTable && null divergents
       if canContinue
         then do
           r <-
             lift $
               Tx.statement
-                (migrationName @m)
+                (migrationName m)
                 [Sql.maybeStatement|
                   SELECT up::text, down::text, executed_at::timestamptz
                   FROM hasql_mover_migration
@@ -153,22 +153,22 @@ checkMigrations =
                 |]
           case r of
             Just (oldUp, oldDown, executedAt)
-              | oldUp == up @m -> addUp @m executedAt
-              | otherwise -> addDivergent @m executedAt oldUp oldDown
-            Nothing -> addPending @m
-        else addPending @m
+              | oldUp == up m -> addUp m executedAt
+              | otherwise -> addDivergent m executedAt oldUp oldDown
+            Nothing -> addPending m
+        else addPending m
 
-    addDivergent :: forall m. (Migration m) => UTCTime -> Text -> Text -> CheckM ()
-    addDivergent executedAt oldUp oldDown =
-      modify' \CheckState {..} -> CheckState {divergents = DivergentMigration {migration = migration @m, ..} : divergents, ..}
+    addDivergent :: (Migration m) => m -> UTCTime -> Text -> Text -> CheckM ()
+    addDivergent migration executedAt oldUp oldDown =
+      modify' \CheckState {..} -> CheckState {divergents = DivergentMigration {migration, ..} : divergents, ..}
 
-    addPending :: forall m. (Migration m) => CheckM ()
-    addPending =
-      modify' \CheckState {..} -> CheckState {pendings = PendingMigration {migration = migration @m, ..} : pendings, ..}
+    addPending :: (Migration m) => m -> CheckM ()
+    addPending migration =
+      modify' \CheckState {..} -> CheckState {pendings = PendingMigration {migration, ..} : pendings, ..}
 
-    addUp :: forall m. (Migration m) => UTCTime -> CheckM ()
-    addUp executedAt =
-      modify' \CheckState {..} -> CheckState {ups = UpMigration {migration = migration @m, ..} : ups, ..}
+    addUp :: (Migration m) => m -> UTCTime -> CheckM ()
+    addUp migration executedAt =
+      modify' \CheckState {..} -> CheckState {ups = UpMigration {migration, ..} : ups, ..}
 
 --------------------------------------------------------------------------------
 -- Performing migrations
@@ -205,8 +205,8 @@ migrationCli =
 
 data MigrationError
   = MigrationCheckError !Sql.QueryError
+  | MigrationUpError !PendingMigration !Sql.QueryError
   | MigrationConnectError !Sql.ConnectionError
-  deriving stock (Show)
 
 performMigrations
   :: forall migrations
@@ -215,16 +215,38 @@ performMigrations
   -> IO (Either MigrationError ())
 performMigrations MigrationCli {connect, cmd} = runExceptT do
   db <- errBy MigrationConnectError connect
-  CheckedMigrations {ups, divergents, pendings} <- errBy MigrationCheckError (Sql.run (checkMigrations @migrations) db)
+  let check = errBy MigrationCheckError (Sql.run (checkMigrations @migrations) db)
+  checked@CheckedMigrations {ups, divergents, pendings} <- check
   case cmd of
-    MigrateStatus -> do
-      liftIO . putDoc . R.vsep $
+    MigrateStatus -> liftIO (putDoc (ppStatus checked))
+    MigrateUp
+      | null divergents -> do
+          forM_ pendings \p@PendingMigration {migration} -> do
+            errBy (MigrationUpError p) (Sql.run (runPending migration) db)
+            liftIO . putDoc . ppStatus =<< check
+      | otherwise -> do
+          liftIO . putDoc . ppStatus =<< check
+    _ -> pure ()
+  where
+    runPending m = do
+      case cast m of
+        Just BaseMigration -> Tx.transaction Tx.Serializable Tx.Write $ Tx.sql $ Text.encodeUtf8 $ up BaseMigration
+        _ -> pure ()
+      Tx.transaction Tx.Serializable Tx.Write $
+        Tx.statement
+          (migrationName m, up m, down m)
+          [Sql.singletonStatement|
+            INSERT INTO hasql_mover_migration (name, up, down) VALUES($1::text, $2::text, $3::text)
+            RETURNING time::timestamptz
+          |]
+
+    ppStatus CheckedMigrations {ups, divergents, pendings} =
+      R.vsep
         [ foldMap ppUp ups
         , foldMap ppDivergent divergents
         , foldMap ppPending pendings
         ]
-    _ -> pure ()
-  where
+
     ppUp UpMigration {migration, executedAt} =
       R.annotate (color Green) $ R.hsep ["[ UP ", R.viaShow executedAt, " ]", R.align (R.viaShow migration)]
     ppDivergent DivergentMigration {migration, executedAt} =
@@ -233,21 +255,6 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
       R.annotate (colorDull White) $ R.hsep ["[ PENDING ]", R.align (R.viaShow migration)]
 
     errBy f a = withExceptT f (ExceptT a)
-
--- CheckedMigrations {pendings} = do
--- forM_ pendings \(PendingMigration (m :: m)) -> do
---   case cast m of
---     Just BaseMigration -> Tx.transaction Tx.Serializable Tx.Write $ Tx.sql $ Text.encodeUtf8 $ up @BaseMigration
---     _ -> pure ()
---   _now <-
---     Tx.transaction Tx.Serializable Tx.Write $
---       Tx.statement
---         (migrationName @m, up @m, down @m)
---         [Sql.singletonStatement|
---       INSERT INTO hasql_mover_migration (name, up, down) VALUES($1::text, $2::text, $3::text)
---       RETURNING time::timestamptz
---     |]
---   pure ()
 
 --------------------------------------------------------------------------------
 -- Declaring migrations
