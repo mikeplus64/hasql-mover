@@ -237,7 +237,7 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
           , ""
           ]
       (`Sql.run` db) $ Tx.transaction Tx.Serializable Tx.Write do
-        Tx.sql $ Text.encodeUtf8 $ up BaseMigration
+        Tx.sql $ Text.encodeUtf8 $ up m
         Tx.statement
           (migrationName m, up m, down m)
           [Sql.singletonStatement|
