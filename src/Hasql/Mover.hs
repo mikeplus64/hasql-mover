@@ -6,6 +6,7 @@ module Hasql.Mover (
 
   -- * Checking and running migrations
   MigrationCli (..),
+  MigrationCmd (..),
   MigrationError (..),
   hasqlMoverMain,
   hasqlMoverOpts,
@@ -227,6 +228,19 @@ data MigrationCmd
   | MigrateDown {undoDivergents :: Bool, divergentUseOldDown :: Bool}
   | MigrateStatus
 
+data HasqlMoved = HasqlMoved
+
+hasqlMover
+  :: forall ms
+   . (All Migration ms)
+  => MigrationCli
+  -> IO (Either Doc HasqlMoved)
+hasqlMover cli = do
+  result <- performMigrations @ms cli
+  pure $! case result of
+    Right () -> Right HasqlMoved
+    Left err -> Left (prettyMigrationError err <+> R.softline)
+
 hasqlMoverOpts :: O.Parser MigrationCli
 hasqlMoverOpts =
   MigrationCli
@@ -243,19 +257,6 @@ hasqlMoverOpts =
       MigrateDown
         <$> O.switch (O.long "undo-diverging" <> O.short 'u' <> O.help "Can we undo a diverging migration?")
         <*> O.switch (O.long "divergent-down-from-old" <> O.short 'o' <> O.help "Use the 'down' definition for a divergent migration from its original definition, when it was initially ran")
-
-data HasqlMoved = HasqlMoved
-
-hasqlMover
-  :: forall ms
-   . (All Migration ms)
-  => MigrationCli
-  -> IO (Either Doc HasqlMoved)
-hasqlMover cli = do
-  result <- performMigrations @ms cli
-  pure $! case result of
-    Right () -> Right HasqlMoved
-    Left err -> Left (prettyMigrationError err <+> R.softline)
 
 hasqlMoverMain :: forall ms. (All Migration ms) => IO ()
 hasqlMoverMain = do
