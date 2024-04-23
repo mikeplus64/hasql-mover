@@ -1,3 +1,5 @@
+{-# LANGUAGE ApplicativeDo #-}
+
 module Hasql.Mover (
   Migration (..),
 
@@ -18,6 +20,7 @@ import Control.Monad (forM_, void)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except (ExceptT (..), runExceptT, throwE, withExceptT)
+import Control.Monad.Trans.Resource (allocate, runResourceT)
 import Control.Monad.Trans.State.Strict (StateT (..), execStateT, gets, modify')
 import Data.ByteString (ByteString)
 import Data.Char (isSpace)
@@ -218,8 +221,25 @@ checkMigrations =
 --------------------------------------------------------------------------------
 -- Performing migrations
 
+newtype RunSession = RunSession (forall a. Sql.Session a -> IO (Either Sql.QueryError a))
+
+data MigrationDB = forall db.
+  MigrationDB
+  { acquire :: IO (Either Sql.ConnectionError db)
+  , release :: db -> IO ()
+  , run :: forall a. Sql.Session a -> db -> IO (Either Sql.QueryError a)
+  }
+
+migrationDBFromSettings :: Sql.Settings -> MigrationDB
+migrationDBFromSettings connstr =
+  MigrationDB
+    { acquire = Sql.acquire connstr
+    , release = Sql.release
+    , run = Sql.run
+    }
+
 data MigrationCli = MigrationCli
-  { connect :: IO (Either Sql.ConnectionError Sql.Connection)
+  { db :: MigrationDB
   , cmd :: MigrationCmd
   }
 
@@ -244,7 +264,7 @@ hasqlMover cli = do
 hasqlMoverOpts :: O.Parser MigrationCli
 hasqlMoverOpts =
   MigrationCli
-    <$> (Sql.acquire . Text.encodeUtf8 . Text.pack <$> O.strOption (O.long "db" <> O.metavar "DB"))
+    <$> (migrationDBFromSettings . Text.encodeUtf8 . Text.pack <$> O.strOption (O.long "db" <> O.metavar "DB"))
     <*> O.subparser
       ( mconcat
           [ O.command "up" (O.info (pure MigrateUp) (O.progDesc "Perform any pending migrations"))
@@ -311,16 +331,21 @@ performMigrations
    . (All Migration migrations)
   => MigrationCli
   -> IO (Either MigrationError ())
-performMigrations MigrationCli {connect, cmd} = runExceptT do
-  db <- errBy MigrationConnectError connect
-  let check = errBy MigrationCheckError (Sql.run (checkMigrations @migrations) db)
-  checked@CheckedMigrations {ups, divergents, pendings} <- check
-
+performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} = runResourceT $ runExceptT do
+  (releaseKey, mdb) <- allocate acquire \case
+    Left _ -> pure ()
+    Right db -> release db
+  db <- errBy MigrationConnectError (pure mdb)
   let
+    check = errBy MigrationCheckError (runSession (checkMigrations @migrations))
+
+    runSession :: (MonadIO m) => Sql.Session a -> m (Either Sql.QueryError a)
+    runSession s = liftIO (run s db)
+
     runPending :: (Migration m) => m -> IO (Either Sql.QueryError UTCTime)
     runPending m = do
       putDoc (prettyPending (PendingMigration m))
-      (`Sql.run` db) $ Tx.transaction Tx.Serializable Tx.Write do
+      runSession $ Tx.transaction Tx.Serializable Tx.Write do
         Tx.sql $ Text.encodeUtf8 $ up m
         Tx.statement
           (migrationName m, up m, down m)
@@ -332,12 +357,13 @@ performMigrations MigrationCli {connect, cmd} = runExceptT do
     runRollback :: (Migration m) => m -> Text -> IO (Either Sql.QueryError ())
     runRollback m downSql = do
       putDoc (prettyRollback (Rollback m))
-      (`Sql.run` db) $ Tx.transaction Tx.Serializable Tx.Write do
+      runSession $ Tx.transaction Tx.Serializable Tx.Write do
         Tx.sql $ Text.encodeUtf8 downSql
         case cast m of
           Just BaseMigration -> pure ()
           Nothing -> Tx.statement (migrationName m) [Sql.resultlessStatement|DELETE FROM hasql_mover_migration WHERE name = ($1::text)|]
 
+  checked@CheckedMigrations {ups, divergents, pendings} <- check
   case cmd of
     MigrateStatus -> liftIO (putDoc (ppStatus "Current migrations status" checked))
     MigrateUp

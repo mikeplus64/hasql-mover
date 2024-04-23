@@ -23,6 +23,7 @@ library
     , prettyprinter
     , prettyprinter-ansi-terminal
     , PyF
+    , resourcet
     , sop-core
     , template-haskell
     , text
