@@ -9,8 +9,10 @@ module Hasql.Mover (
   -- * Checking and running migrations
   MigrationCli (..),
   MigrationDB (..),
+  migrationDBFromSettings,
   MigrationCmd (..),
   MigrationError (..),
+  HasqlMoved,
   hasqlMoverMain,
   hasqlMoverOpts,
   hasqlMover,
