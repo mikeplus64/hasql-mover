@@ -9,6 +9,7 @@ module Hasql.Mover (
   MigrationError (..),
   hasqlMoverMain,
   hasqlMoverOpts,
+  hasqlMover,
 ) where
 
 import Control.Exception qualified as E
@@ -243,13 +244,26 @@ hasqlMoverOpts =
         <$> O.switch (O.long "undo-diverging" <> O.short 'u' <> O.help "Can we undo a diverging migration?")
         <*> O.switch (O.long "divergent-down-from-old" <> O.short 'o' <> O.help "Use the 'down' definition for a divergent migration from its original definition, when it was initially ran")
 
+data HasqlMoved = HasqlMoved
+
+hasqlMover
+  :: forall ms
+   . (All Migration ms)
+  => MigrationCli
+  -> IO (Either Doc HasqlMoved)
+hasqlMover cli = do
+  result <- performMigrations @ms cli
+  pure $! case result of
+    Right () -> Right HasqlMoved
+    Left err -> Left (prettyMigrationError err <+> R.softline)
+
 hasqlMoverMain :: forall ms. (All Migration ms) => IO ()
 hasqlMoverMain = do
   cli <- O.execParser (O.info hasqlMoverOpts mempty)
-  result <- performMigrations @ms cli
+  result <- hasqlMover @ms cli
   case result of
-    Right () -> putStrLn "Done"
-    Left err -> putDoc (prettyMigrationError err <+> R.softline)
+    Right HasqlMoved -> putStrLn "Done"
+    Left err -> putDoc err
 
 data MigrationError
   = MigrationCheckError !Sql.QueryError
