@@ -92,5 +92,3 @@ library
     TypeOperators
     UndecidableInstances
     ViewPatterns
-
-  ghc-options:        -fno-warn-name-shadowing
