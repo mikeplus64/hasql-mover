@@ -7,15 +7,20 @@ module Hasql.Mover (
   declareMigration,
 
   -- * Checking and running migrations
+
+  -- ** Main functions
+  hasqlMover,
+  performMigrations,
   MigrationCli (..),
-  MigrationDB (..),
-  migrationDBFromSettings,
   MigrationCmd (..),
   MigrationError (..),
-  HasqlMoved,
-  hasqlMoverMain,
+
+  -- ** Settings
+  MigrationDB (..),
+  migrationDBFromSettings,
+
+  -- ** Integrating into an existing "main"
   hasqlMoverOpts,
-  hasqlMover,
 ) where
 
 import Control.Exception qualified as E
@@ -225,8 +230,8 @@ checkMigrations =
 --------------------------------------------------------------------------------
 -- Performing migrations
 
-newtype RunSession = RunSession (forall a. Sql.Session a -> IO (Either Sql.QueryError a))
-
+-- | Encapsulates a way to run a hasql session; it could be through a pool, or
+-- through a connection directly.
 data MigrationDB = forall db.
   MigrationDB
   { acquire :: IO (Either Sql.ConnectionError db)
@@ -254,19 +259,7 @@ data MigrationCmd
   | MigrateForceUp Text
   | MigrateForceDown Text
 
-data HasqlMoved = HasqlMoved
-
-hasqlMover
-  :: forall ms
-   . (All Migration ms)
-  => MigrationCli
-  -> IO (Either Doc HasqlMoved)
-hasqlMover cli = do
-  result <- performMigrations @ms cli
-  pure $! case result of
-    Right () -> Right HasqlMoved
-    Left err -> Left (prettyMigrationError err <+> R.softline)
-
+-- | optparse-applicative options for hasql-mover; use 'hasqlMover' to then run the parsed options
 hasqlMoverOpts :: O.Parser MigrationCli
 hasqlMoverOpts =
   MigrationCli
@@ -288,18 +281,38 @@ hasqlMoverOpts =
         <$> O.switch (O.long "undo-diverging" <> O.short 'u' <> O.help "Can we undo a diverging migration?")
         <*> O.switch (O.long "divergent-down-from-old" <> O.short 'o' <> O.help "Use the 'down' definition for a divergent migration from its original definition, when it was initially ran")
 
-hasqlMoverMain :: forall ms. (All Migration ms) => IO ()
-hasqlMoverMain = do
+-- | Main function for running hasql-mover migrations
+--
+-- Example usage:
+--
+-- @
+-- [declareMigration|
+-- name = V0
+--
+-- [up]
+-- CREATE TABLE foo ();
+--
+-- [down]
+-- DROP TABLE foo CASCADE;
+-- |]
+--
+-- type Migrations = '[V0]
+--
+-- main :: IO ()
+-- main = hasqlMoverMain @Migrations
+-- @
+hasqlMover :: forall ms. (All Migration ms) => IO ()
+hasqlMover = do
   cli <-
     O.execParser
       ( O.info
           (hasqlMoverOpts O.<**> O.helper)
           (O.fullDesc <> O.progDesc "Perform or check hasql-mover migrations")
       )
-  result <- hasqlMover @ms cli
+  result <- performMigrations @ms cli
   case result of
-    Right HasqlMoved -> putStrLn "Done"
-    Left err -> putDoc err
+    Right () -> putStrLn "Done"
+    Left err -> putDoc (prettyMigrationError err <+> R.softline)
 
 data MigrationError
   = MigrationCheckError !Sql.QueryError
@@ -343,6 +356,7 @@ prettyMigrationError = \case
       Sql.UnexpectedResult err -> R.pretty err
       err -> R.viaShow err
 
+-- | Perform the migrations according to some 'MigrationCli'
 performMigrations
   :: forall migrations
    . (All Migration migrations)
