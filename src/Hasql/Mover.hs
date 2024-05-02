@@ -116,9 +116,15 @@ data CheckedMigrations names = CheckedMigrations
   , pendings :: [PendingMigration]
   }
 
+-- | A mapping from a singleton migration name to its up and down SQL
 class (Typeable a, Show a) => Migration a where
+  -- | The name for this migration
   migration :: a
+
+  -- | How to run this migration
   up :: a -> Text
+
+  -- | How to rollback this migration
   down :: a -> Text
 
 migrationName :: (Migration a) => a -> Text
@@ -127,6 +133,7 @@ migrationName = Text.pack . show
 --------------------------------------------------------------------------------
 -- The base migration
 
+-- | Sets up necessary tables for hasql-mover
 data BaseMigration = BaseMigration
   deriving stock (Show, Read, Eq, Ord)
 
