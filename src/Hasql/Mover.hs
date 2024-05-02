@@ -54,7 +54,6 @@ import Options.Applicative qualified as O
 import Prettyprinter ((<+>))
 import Prettyprinter qualified as R
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, colorDull, putDoc)
-import PyF (strTrim)
 import Text.Megaparsec qualified as M
 import Text.Megaparsec.Char qualified as M
 import Text.Megaparsec.Char.Lexer qualified as L
@@ -134,15 +133,15 @@ data BaseMigration = BaseMigration
 instance Migration BaseMigration where
   migration = BaseMigration
   up _ =
-    [strTrim|
-    CREATE TABLE hasql_mover_migration (
-      id serial NOT NULL,
-      name text NOT NULL,
-      up text NOT NULL,
-      down text NOT NULL,
-      executed_at timestamptz NOT NULL DEFAULT now()
-    )|]
-  down _ = [strTrim|DROP TABLE hasql_mover_migration CASCADE|]
+    "CREATE TABLE hasql_mover_migration (\n\
+    \  id serial NOT NULL,\n\
+    \  name text NOT NULL,\n\
+    \  up text NOT NULL,\n\
+    \  down text NOT NULL,\n\
+    \  executed_at timestamptz NOT NULL DEFAULT now()\n\
+    \)"
+  down _ =
+    "DROP TABLE hasql_mover_migration CASCADE"
 
 newtype Rollback m = Rollback m
   deriving stock (Show, Read)
