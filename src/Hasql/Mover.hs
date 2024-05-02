@@ -1,4 +1,5 @@
 {-# LANGUAGE ApplicativeDo #-}
+{-# OPTIONS_GHC -fno-warn-name-shadowing #-}
 
 module Hasql.Mover (
   Migration (..),
@@ -30,12 +31,10 @@ import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except (ExceptT (..), runExceptT, throwE, withExceptT)
 import Control.Monad.Trans.Resource (allocate, runResourceT)
 import Control.Monad.Trans.State.Strict (State, StateT (..), execState, execStateT, gets, modify', put)
-import Data.ByteString (ByteString)
 import Data.Char (isSpace)
 import Data.Proxy (Proxy (..))
 import Data.SOP.Constraint (All)
 import Data.SOP.NP (NP (..), cpure_NP, ctraverse__NP, traverse__NP)
-import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
@@ -331,17 +330,21 @@ data MigrationError
   | MigrationNothingToRollback
   | MigrationGotDivergents
   | MigrationException !E.SomeException
+  | MigrationNotFound !Text
 
 prettyMigrationError :: MigrationError -> Doc
 prettyMigrationError = \case
   MigrationCheckError qe -> "Check error" <+> prettyQueryError qe
   MigrationUpError pending qe -> "Up error" <+> prettyPending pending <+> prettyQueryError qe
   MigrationDownError up qe -> "Down error" <+> prettyUp up <+> prettyQueryError qe
+  MigrationForceUpError (SomeMigration m) qe -> "Forced up error" <+> R.viaShow m <+> prettyQueryError qe
+  MigrationForceDownError (SomeMigration m) qe -> "Forced down error" <+> R.viaShow m <+> prettyQueryError qe
   MigrationDivergentDownError up qe -> "Divergent down error" <+> prettyDivergent up <+> prettyQueryError qe
   MigrationConnectError connerr -> "Connection error" <+> R.viaShow connerr
   MigrationNothingToRollback -> "Nothing to roll back"
   MigrationGotDivergents -> "Divergent migrations"
   MigrationException se -> R.viaShow se
+  MigrationNotFound name -> "Migration not found:" <+> R.viaShow name
   where
     prettyQueryError (Sql.QueryError bs params cmderr) =
       R.vsep
@@ -369,7 +372,7 @@ performMigrations
   => MigrationCli
   -> IO (Either MigrationError ())
 performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} = runResourceT $ runExceptT do
-  (releaseKey, mdb) <- allocate acquire \case
+  (_releaseKey, mdb) <- allocate acquire \case
     Left _ -> pure ()
     Right db -> release db
   db <- errBy MigrationConnectError (pure mdb)
@@ -423,7 +426,7 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
     MigrateUp
       | null divergents -> do
           forM_ pendings \p@PendingMigration {migration} -> do
-            wrapQuery (MigrationUpError p) (runPending migration)
+            _ <- wrapQuery (MigrationUpError p) (runPending migration)
             liftIO . putDoc . ppStatus "New migrations status" =<< check
       | otherwise -> throwE MigrationGotDivergents
     -- Down
@@ -441,11 +444,11 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
     -- Forcing down
     MigrateForceDown nameText | Just (SomeMigration m) <- findMigrationByName nameText -> do
       wrapQuery (MigrationForceDownError (SomeMigration m)) (runRollback m (down m))
-    MigrateForceDown _ -> error "Cannot find that migration"
+    MigrateForceDown nameText -> throwE (MigrationNotFound nameText)
     -- Forcing up
     MigrateForceUp nameText | Just (SomeMigration m) <- findMigrationByName nameText -> void do
       wrapQuery (MigrationForceUpError (SomeMigration m)) (runPending m)
-    MigrateForceUp _ -> error "Cannot find that migration"
+    MigrateForceUp nameText -> throwE (MigrationNotFound nameText)
   where
     ppStatus :: Text -> CheckedMigrations m -> Doc
     ppStatus title CheckedMigrations {ups, divergents, pendings} =
@@ -562,8 +565,3 @@ parseName =
           cs <- M.many M.alphaNumChar
           pure (c1 : cs)
       )
-
-line :: P Text
-line =
-  M.label "a line of text" $
-    M.takeWhile1P Nothing (/= '\n') <* M.try M.newline
