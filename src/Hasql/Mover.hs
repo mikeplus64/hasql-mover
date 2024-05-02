@@ -290,7 +290,12 @@ hasqlMoverOpts =
 
 hasqlMoverMain :: forall ms. (All Migration ms) => IO ()
 hasqlMoverMain = do
-  cli <- O.execParser (O.info hasqlMoverOpts mempty)
+  cli <-
+    O.execParser
+      ( O.info
+          (hasqlMoverOpts O.<**> O.helper)
+          (O.fullDesc <> O.progDesc "Perform or check hasql-mover migrations")
+      )
   result <- hasqlMover @ms cli
   case result of
     Right HasqlMoved -> putStrLn "Done"
