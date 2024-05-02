@@ -2,10 +2,16 @@ cabal-version:   3.0
 name:            hasql-mover
 version:         0.1.0.0
 synopsis:        Hasql migrations library
+description:
+  A SQL renovator and removalist; a library for performing SQL migrations using
+  Hasql, including an easy CLI for viewing and running migrations. Migrations are
+  declared in-code as quasi-quoted SQL, and chained together in a type-level
+  list of migrations.
+
 license:         BSD-3-Clause
 license-file:    LICENSE
 author:          Mike Ledger
-maintainer:      mike@quasimal.com
+maintainer:      eleventynine@gmail.com
 category:        Database
 build-type:      Simple
 extra-doc-files: CHANGELOG.md
