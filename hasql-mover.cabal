@@ -13,7 +13,7 @@ extra-doc-files: CHANGELOG.md
 library
   exposed-modules:    Hasql.Mover
   build-depends:
-    , base
+    , base                         >=4.16 && <4.20
     , bytestring
     , hasql
     , hasql-th
