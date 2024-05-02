@@ -408,6 +408,8 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
       , u@DivergentMigration {migration, oldDown} <- last divergents -> do
           wrapQuery (MigrationDivergentDownError u) (runRollback migration (if divergentUseOldDown then oldDown else down migration))
           throwE MigrationNothingToRollback
+      | not (null divergents) ->
+          throwE MigrationGotDivergents
       | u@UpMigration {migration} <- last ups -> do
           wrapQuery (MigrationDownError u) (runRollback migration (down migration))
           liftIO . putDoc . ppStatus "New migrations status" =<< check
