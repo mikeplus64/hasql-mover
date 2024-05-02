@@ -19,17 +19,17 @@ module Hasql.Mover (
 ) where
 
 import Control.Exception qualified as E
-import Control.Monad (forM_, void)
+import Control.Monad (forM_, void, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except (ExceptT (..), runExceptT, throwE, withExceptT)
 import Control.Monad.Trans.Resource (allocate, runResourceT)
-import Control.Monad.Trans.State.Strict (StateT (..), execStateT, gets, modify')
+import Control.Monad.Trans.State.Strict (State, StateT (..), execState, execStateT, gets, modify', put)
 import Data.ByteString (ByteString)
 import Data.Char (isSpace)
 import Data.Proxy (Proxy (..))
 import Data.SOP.Constraint (All)
-import Data.SOP.NP (NP (..), cpure_NP, traverse__NP)
+import Data.SOP.NP (NP (..), cpure_NP, ctraverse__NP, traverse__NP)
 import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as Text
@@ -62,6 +62,7 @@ data PendingMigration = forall m. (Migration m) => PendingMigration {migration :
 data UpMigration = forall m. (Migration m) => UpMigration {migration :: m, executedAt :: UTCTime}
 data DivergentMigration = forall m. (Migration m) => DivergentMigration {migration :: m, oldUp, oldDown :: Text, executedAt :: UTCTime}
 data UnknownMigration m = (Migration m) => UnknownMigration m
+data SomeMigration where SomeMigration :: (Migration m) => m -> SomeMigration
 
 type Doc = R.Doc AnsiStyle
 
@@ -139,7 +140,7 @@ instance Migration BaseMigration where
   down _ = [strTrim|DROP TABLE hasql_mover_migration CASCADE|]
 
 newtype Rollback m = Rollback m
-  deriving stock (Show)
+  deriving stock (Show, Read)
 
 instance (Migration m) => Migration (Rollback m) where
   migration = Rollback migration
@@ -250,6 +251,8 @@ data MigrationCmd
   = MigrateUp
   | MigrateDown {undoDivergents :: Bool, divergentUseOldDown :: Bool}
   | MigrateStatus
+  | MigrateForceUp Text
+  | MigrateForceDown Text
 
 data HasqlMoved = HasqlMoved
 
@@ -272,10 +275,14 @@ hasqlMoverOpts =
       ( mconcat
           [ O.command "up" (O.info (pure MigrateUp) (O.progDesc "Perform any pending migrations"))
           , O.command "down" (O.info migrateDown (O.progDesc "Rollback the last migration"))
+          , O.command "force-up" (O.info migrateForceUp (O.progDesc "Run a given up migration"))
+          , O.command "force-down" (O.info migrateForceDown (O.progDesc "Run a given down migration"))
           , O.command "status" (O.info (pure MigrateStatus) (O.progDesc "Check current status"))
           ]
       )
   where
+    migrateForceUp = MigrateForceUp <$> O.strArgument mempty
+    migrateForceDown = MigrateForceDown <$> O.strArgument mempty
     migrateDown =
       MigrateDown
         <$> O.switch (O.long "undo-diverging" <> O.short 'u' <> O.help "Can we undo a diverging migration?")
@@ -293,6 +300,8 @@ data MigrationError
   = MigrationCheckError !Sql.QueryError
   | MigrationUpError !PendingMigration !Sql.QueryError
   | MigrationDownError !UpMigration !Sql.QueryError
+  | MigrationForceUpError !SomeMigration !Sql.QueryError
+  | MigrationForceDownError !SomeMigration !Sql.QueryError
   | MigrationDivergentDownError !DivergentMigration !Sql.QueryError
   | MigrationConnectError !Sql.ConnectionError
   | MigrationNothingToRollback
@@ -367,14 +376,32 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
           Nothing -> Tx.statement (migrationName m) [Sql.resultlessStatement|DELETE FROM hasql_mover_migration WHERE name = ($1::text)|]
 
   checked@CheckedMigrations {ups, divergents, pendings} <- check
+
+  let
+    findMigrationByName :: Text -> Maybe SomeMigration
+    findMigrationByName name =
+      (`execState` Nothing) do
+        ctraverse__NP (Proxy @Migration) findIt allMigrations
+      where
+        findIt :: (Migration m) => UnknownMigration m -> State (Maybe SomeMigration) ()
+        findIt (UnknownMigration m) =
+          when
+            (Text.pack (show m) == name)
+            (put (Just (SomeMigration m)))
+
+        allMigrations = cpure_NP (Proxy @Migration) (UnknownMigration migration) :: NP UnknownMigration migrations
+
   case cmd of
+    -- Status
     MigrateStatus -> liftIO (putDoc (ppStatus "Current migrations status" checked))
+    -- Up
     MigrateUp
       | null divergents -> do
           forM_ pendings \p@PendingMigration {migration} -> do
             wrapQuery (MigrationUpError p) (runPending migration)
             liftIO . putDoc . ppStatus "New migrations status" =<< check
       | otherwise -> throwE MigrationGotDivergents
+    -- Down
     MigrateDown {undoDivergents, divergentUseOldDown}
       | null ups && (null divergents && not undoDivergents) -> throwE MigrationNothingToRollback
       | undoDivergents && not (null divergents)
@@ -384,6 +411,14 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
       | u@UpMigration {migration} <- last ups -> do
           wrapQuery (MigrationDownError u) (runRollback migration (down migration))
           liftIO . putDoc . ppStatus "New migrations status" =<< check
+    -- Forcing down
+    MigrateForceDown nameText | Just (SomeMigration m) <- findMigrationByName nameText -> do
+      wrapQuery (MigrationForceDownError (SomeMigration m)) (runRollback m (down m))
+    MigrateForceDown _ -> error "Cannot find that migration"
+    -- Forcing up
+    MigrateForceUp nameText | Just (SomeMigration m) <- findMigrationByName nameText -> void do
+      wrapQuery (MigrationForceUpError (SomeMigration m)) (runPending m)
+    MigrateForceUp _ -> error "Cannot find that migration"
   where
     ppStatus :: Text -> CheckedMigrations m -> Doc
     ppStatus title CheckedMigrations {ups, divergents, pendings} =
