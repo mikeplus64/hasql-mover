@@ -15,6 +15,9 @@ module Hasql.Mover (
   MigrationCli (..),
   MigrationCmd (..),
   MigrationError (..),
+  SomeMigration (..),
+  UpMigration (..),
+  PendingMigration (..),
 
   -- ** Settings
   MigrationDB (..),
