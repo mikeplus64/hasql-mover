@@ -1,6 +1,3 @@
-{-# LANGUAGE ApplicativeDo #-}
-{-# OPTIONS_GHC -fno-warn-name-shadowing #-}
-
 module Hasql.Mover (
   Migration (..),
   SomeMigration (..),

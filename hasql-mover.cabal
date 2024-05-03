@@ -97,4 +97,4 @@ library
     UndecidableInstances
     ViewPatterns
 
-  ghc-options:        -Wall
+  ghc-options:        -Wall -fno-warn-name-shadowing
