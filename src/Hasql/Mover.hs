@@ -3,6 +3,7 @@
 
 module Hasql.Mover (
   Migration (..),
+  SomeMigration (..),
 
   -- * Declaration
   declareMigration,
@@ -12,12 +13,18 @@ module Hasql.Mover (
   -- ** Main functions
   hasqlMover,
   performMigrations,
+
+  -- *** Options
   MigrationCli (..),
   MigrationCmd (..),
+
+  -- *** Results
   MigrationError (..),
-  SomeMigration (..),
+
+  -- *** Checked migrations
   UpMigration (..),
   PendingMigration (..),
+  DivergentMigration (..),
 
   -- ** Settings
   MigrationDB (..),
@@ -247,6 +254,8 @@ data MigrationDB = forall db.
   , run :: forall a. Sql.Session a -> db -> IO (Either Sql.QueryError a)
   }
 
+-- | Create a 'MigrationDB' from a hasql settings - a PostgreSQL connection
+-- string as of writing
 migrationDBFromSettings :: Sql.Settings -> MigrationDB
 migrationDBFromSettings connstr =
   MigrationDB
@@ -255,17 +264,30 @@ migrationDBFromSettings connstr =
     , run = Sql.run
     }
 
+-- | Options to supply to 'hasqlMover': a database connection and what migration
+-- command to run
 data MigrationCli = MigrationCli
   { db :: MigrationDB
   , cmd :: MigrationCmd
   }
 
+-- | A command for 'hasqlMover'
 data MigrationCmd
-  = MigrateUp
-  | MigrateDown {undoDivergents :: Bool, divergentUseOldDown :: Bool}
-  | MigrateStatus
-  | MigrateForceUp Text
-  | MigrateForceDown Text
+  = -- | Run pending migrations
+    MigrateUp
+  | -- | Rollback a migration
+    MigrateDown
+      { undoDivergents :: Bool
+      -- ^ Are we allowed to undo a divergent migration? Default: No
+      , divergentUseOldDown :: Bool
+      -- ^ For a divergent migration, use the previous "down" SQL text, or the new one? Default: New down
+      }
+  | -- | Print the current status
+    MigrateStatus
+  | -- | Force the 'up' of a migration to run, regardless of its status or position in the migrations list
+    MigrateForceUp Text
+  | -- | Force the 'down' of a migration to run, regardless of its status or position in the migrations list
+    MigrateForceDown Text
 
 -- | optparse-applicative options for hasql-mover; use 'hasqlMover' to then run the parsed options
 hasqlMoverOpts :: O.Parser MigrationCli
@@ -436,9 +458,10 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
     MigrateDown {undoDivergents, divergentUseOldDown}
       | null ups && (null divergents && not undoDivergents) -> throwE MigrationNothingToRollback
       | undoDivergents && not (null divergents)
-      , u@DivergentMigration {migration, oldDown} <- last divergents -> do
-          wrapQuery (MigrationDivergentDownError u) (runRollback migration (if divergentUseOldDown then oldDown else down migration))
-          throwE MigrationNothingToRollback
+      , u@DivergentMigration {migration, oldDown} <- last divergents ->
+          wrapQuery
+            (MigrationDivergentDownError u)
+            (runRollback migration (if divergentUseOldDown then oldDown else down migration))
       | not (null divergents) ->
           throwE MigrationGotDivergents
       | u@UpMigration {migration} <- last ups -> do
