@@ -293,9 +293,9 @@ data MigrationCmd
   | -- | Print the current status
     MigrateStatus
   | -- | Force the 'up' of a migration to run, regardless of its status or position in the migrations list
-    MigrateForceUp Text
+    MigrateForceUp {migrationName :: Text}
   | -- | Force the 'down' of a migration to run, regardless of its status or position in the migrations list
-    MigrateForceDown Text
+    MigrateForceDown {migrationName :: Text}
 
 -- | optparse-applicative options for hasql-mover; use 'hasqlMover' to then run the parsed options
 hasqlMoverOpts :: O.Parser MigrationCli
