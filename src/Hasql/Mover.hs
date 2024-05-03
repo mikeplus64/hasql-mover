@@ -45,10 +45,12 @@ import Data.Char (isSpace)
 import Data.Proxy (Proxy (..))
 import Data.SOP.Constraint (All)
 import Data.SOP.NP (NP (..), cpure_NP, ctraverse__NP, traverse__NP)
+import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Time (UTCTime)
+import Data.Time.Format qualified as Time
 import Data.Typeable (Typeable, cast)
 import Data.Void (Void)
 import Hasql.Connection qualified as Sql
@@ -82,35 +84,41 @@ type Doc = R.Doc AnsiStyle
 prettyPending :: PendingMigration -> Doc
 prettyPending PendingMigration {migration} =
   R.vsep
-    [ "Pending " <+> R.viaShow migration <+> R.line
-    , R.annotate (colorDull Green) "[up]" <+> R.line
-    , R.pretty (up migration) <+> R.line
+    [ "Pending " <+> R.viaShow migration
+    , R.annotate (colorDull Green) "[up]"
+    , R.pretty (up migration)
+    , R.hardline
     ]
 
 prettyUp :: UpMigration -> Doc
 prettyUp UpMigration {migration, executedAt} =
   R.vsep
-    [ "Up " <+> R.viaShow migration <+> "executed at" <+> R.viaShow executedAt <+> R.line
-    , R.annotate (colorDull Green) "[up]" <+> R.line
-    , R.pretty (up migration) <+> R.line
+    [ "Up " <+> R.viaShow migration <+> "executed at" <+> R.viaShow executedAt
+    , R.annotate (colorDull Green) "[up]"
+    , R.pretty (up migration)
+    , R.hardline
     ]
 
 prettyDivergent :: DivergentMigration -> Doc
 prettyDivergent DivergentMigration {migration, oldUp, executedAt} =
   R.vsep
-    [ "Divergent " <+> R.viaShow migration <+> "executed at" <+> R.viaShow executedAt <+> R.line
-    , R.annotate (colorDull Green) "[up/new]" <+> R.line
-    , R.pretty (up migration) <+> R.line
-    , R.annotate (colorDull Green) "[up/old]" <+> R.line
-    , R.pretty oldUp <+> R.line
+    [ "Divergent " <+> R.viaShow migration <+> "executed at" <+> R.viaShow executedAt
+    , R.annotate (colorDull Green) "[up/new]"
+    , R.pretty (up migration)
+    , R.hardline
+    , R.annotate (colorDull Green) "[up/old]"
+    , R.pretty oldUp
+    , R.hardline
     ]
 
 prettyRollback :: (Migration m) => Rollback m -> Doc
 prettyRollback (Rollback m) =
   R.vsep
-    [ "Rollback of " <+> R.viaShow m <+> R.line
-    , R.annotate (colorDull Green) "[down]" <+> R.line
-    , R.pretty (down m) <+> R.line
+    [ "Rollback of" <+> R.viaShow m
+    , ""
+    , R.annotate (colorDull Green) "[down]"
+    , R.pretty (down m)
+    , R.hardline
     ]
 
 instance Show PendingMigration where
@@ -341,7 +349,7 @@ hasqlMover = do
       )
   result <- performMigrations @ms cli
   case result of
-    Right () -> putStrLn "Done"
+    Right () -> pure ()
     Left err -> putDoc (prettyMigrationError err <+> R.softline)
 
 data MigrationError
@@ -446,13 +454,13 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
 
   case cmd of
     -- Status
-    MigrateStatus -> liftIO (putDoc (ppStatus "Current migrations status" checked))
+    MigrateStatus -> liftIO (putDoc (ppStatus "Current migrations status:" checked))
     -- Up
     MigrateUp
       | null divergents -> do
           forM_ pendings \p@PendingMigration {migration} -> do
             _ <- wrapQuery (MigrationUpError p) (runPending migration)
-            liftIO . putDoc . ppStatus "New migrations status" =<< check
+            liftIO . putDoc . ppStatus "New migrations status:" =<< check
       | otherwise -> throwE MigrationGotDivergents
     -- Down
     MigrateDown {undoDivergents, divergentUseOldDown}
@@ -466,7 +474,7 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
           throwE MigrationGotDivergents
       | u@UpMigration {migration} <- last ups -> do
           wrapQuery (MigrationDownError u) (runRollback migration (down migration))
-          liftIO . putDoc . ppStatus "New migrations status" =<< check
+          liftIO . putDoc . ppStatus "New migrations status:" =<< check
     -- Forcing down
     MigrateForceDown nameText | Just (SomeMigration m) <- findMigrationByName nameText -> do
       wrapQuery (MigrationForceDownError (SomeMigration m)) (runRollback m (down m))
@@ -486,15 +494,18 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
               , map ppDivergent divergents
               , map ppPending pendings
               ]
-        , R.softline
+        , R.hardline
         ]
 
+    title f c = R.annotate (f c)
+    ppExecAt e = fromString (Time.formatTime Time.defaultTimeLocale "%FT%R" e)
+
     ppUp UpMigration {migration, executedAt} =
-      R.annotate (color Green) $ R.hsep ["[ UP ", R.viaShow executedAt, " ]", R.align (R.viaShow migration)]
+      R.hsep [title color Green ("[=] Up" <+> ppExecAt executedAt), R.align (R.viaShow migration)]
     ppDivergent DivergentMigration {migration, executedAt} =
-      R.annotate (color Red) $ R.hsep ["[ DIVERGENT ", R.viaShow executedAt, " ]", R.align (R.viaShow migration)]
+      R.hsep [title color Red ("[d] Up" <+> ppExecAt executedAt), R.align (R.viaShow migration)]
     ppPending PendingMigration {migration} =
-      R.annotate (colorDull White) $ R.hsep ["[ PENDING ]", R.align (R.viaShow migration)]
+      R.hsep [title colorDull Blue "[ ] Pending            ", R.align (R.viaShow migration)]
 
     errBy f a = withExceptT f (ExceptT a)
     wrapQuery f p = do
