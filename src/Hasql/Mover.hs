@@ -256,7 +256,7 @@ data MigrationDB = forall db.
   MigrationDB
   { acquire :: IO (Either Sql.ConnectionError db)
   , release :: db -> IO ()
-  , run :: forall a. Sql.Session a -> db -> IO (Either Sql.QueryError a)
+  , run :: forall a. Sql.Session a -> db -> IO (Either Sql.SessionError a)
   }
 
 -- | Create a 'MigrationDB' from a hasql settings - a PostgreSQL connection
@@ -350,12 +350,12 @@ hasqlMover = do
     Left err -> putDoc (prettyMigrationError err <+> R.softline)
 
 data MigrationError
-  = MigrationCheckError !Sql.QueryError
-  | MigrationUpError !PendingMigration !Sql.QueryError
-  | MigrationDownError !UpMigration !Sql.QueryError
-  | MigrationForceUpError !SomeMigration !Sql.QueryError
-  | MigrationForceDownError !SomeMigration !Sql.QueryError
-  | MigrationDivergentDownError !DivergentMigration !Sql.QueryError
+  = MigrationCheckError !Sql.SessionError
+  | MigrationUpError !PendingMigration !Sql.SessionError
+  | MigrationDownError !UpMigration !Sql.SessionError
+  | MigrationForceUpError !SomeMigration !Sql.SessionError
+  | MigrationForceDownError !SomeMigration !Sql.SessionError
+  | MigrationDivergentDownError !DivergentMigration !Sql.SessionError
   | MigrationConnectError !Sql.ConnectionError
   | MigrationNothingToRollback
   | MigrationGotDivergents
@@ -409,10 +409,10 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
   let
     check = errBy MigrationCheckError (runSession (checkMigrations @migrations))
 
-    runSession :: (MonadIO m) => Sql.Session a -> m (Either Sql.QueryError a)
+    runSession :: (MonadIO m) => Sql.Session a -> m (Either Sql.SessionError a)
     runSession s = liftIO (run s db)
 
-    runPending :: (Migration m) => m -> IO (Either Sql.QueryError UTCTime)
+    runPending :: (Migration m) => m -> IO (Either Sql.SessionError UTCTime)
     runPending m = do
       putDoc (prettyPending (PendingMigration m))
       runSession $ Tx.transaction Tx.Serializable Tx.Write do
@@ -424,7 +424,7 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
               RETURNING executed_at::timestamptz
             |]
 
-    runRollback :: (Migration m) => m -> Text -> IO (Either Sql.QueryError ())
+    runRollback :: (Migration m) => m -> Text -> IO (Either Sql.SessionError ())
     runRollback m downSql = do
       putDoc (prettyRollback (Rollback m))
       runSession $ Tx.transaction Tx.Serializable Tx.Write do

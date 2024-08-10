@@ -1,6 +1,6 @@
 cabal-version:   3.0
 name:            hasql-mover
-version:         0.1.1
+version:         0.1.1.1
 synopsis:        Hasql migrations library
 description:
   A SQL renovator and removalist; a library for performing SQL migrations using
@@ -20,7 +20,7 @@ library
   exposed-modules:    Hasql.Mover
   build-depends:
     , base                         >=4.16 && <4.20
-    , hasql                        ^>=1.6
+    , hasql                        ^>=1.8
     , hasql-th                     ^>=0.4
     , hasql-transaction            >=1.0  && <1.2
     , megaparsec                   >=9.0  && <10
