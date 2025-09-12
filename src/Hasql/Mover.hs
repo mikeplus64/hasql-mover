@@ -576,8 +576,8 @@ declareMigrationFromDirectory name = do
   qtype <- TH.newName (Text.unpack name)
   qconstr <- TH.newName (Text.unpack name)
   dec <- TH.dataD (pure []) qtype [] Nothing [TH.normalC qconstr []] [TH.derivClause (Just TH.StockStrategy) [[t|Show|]]]
-  upSql <- TH.addDependentFile upFile >> TH.runIO (Text.readFile upFile)
-  downSql <- TH.addDependentFile downFile >> TH.runIO (Text.readFile downFile)
+  upSql <- Text.strip <$> (TH.addDependentFile upFile >> TH.runIO (Text.readFile upFile))
+  downSql <- Text.strip <$> (TH.addDependentFile downFile >> TH.runIO (Text.readFile downFile))
   inst <-
     [d|
       instance Migration $(TH.conT qtype) where
