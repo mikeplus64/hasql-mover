@@ -4,6 +4,7 @@ module Hasql.Mover (
 
   -- * Declaration
   declareMigration,
+  declareMigrationFromDirectory,
 
   -- * Checking and running migrations
 
@@ -46,6 +47,7 @@ import Data.String (fromString)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
+import Data.Text.IO qualified as Text
 import Data.Time (UTCTime)
 import Data.Time.Format qualified as Time
 import Data.Typeable (Typeable, cast)
@@ -252,7 +254,8 @@ checkMigrations =
 
 -- | Encapsulates a way to run a hasql session; it could be through a pool, or
 -- through a connection directly.
-data MigrationDB = forall db.
+data MigrationDB
+  = forall db.
   MigrationDB
   { acquire :: IO (Either Sql.ConnectionError db)
   , release :: db -> IO ()
@@ -376,14 +379,23 @@ prettyMigrationError = \case
   MigrationException se -> R.viaShow se
   MigrationNotFound name -> "Migration not found:" <+> R.viaShow name
   where
-    prettyQueryError (Sql.QueryError bs params cmderr) =
-      R.vsep
-        [ "QueryError for  " <+> R.align (R.vsep (map R.pretty (Text.lines (Text.decodeUtf8 bs))))
-        , " - Params: " <+> R.align (R.list (map R.pretty params))
-        , " - Command Error: " <+> R.align case cmderr of
-            Sql.ClientError mc -> "ClientError " <+> foldMap (R.pretty . Text.decodeUtf8) mc
-            Sql.ResultError re -> "ResultError " <+> prettyResultError re
-        ]
+    prettyQueryError = \case
+      Sql.QueryError bs params cmderr ->
+        R.vsep
+          [ "QueryError for  " <+> R.align (R.vsep (map R.pretty (Text.lines (Text.decodeUtf8 bs))))
+          , " - Params: " <+> R.align (R.list (map R.pretty params))
+          , " - Command Error: " <+> R.align (prettyClientError cmderr)
+          ]
+      Sql.PipelineError cmderr ->
+        R.vsep
+          [ "PipelineError"
+          , prettyClientError cmderr
+          ]
+
+    prettyClientError = \case
+      Sql.ClientError mc -> "ClientError " <+> foldMap (R.pretty . Text.decodeUtf8) mc
+      Sql.ResultError re -> "ResultError " <+> prettyResultError re
+
     prettyResultError = \case
       Sql.ServerError code message details hint pos ->
         R.vsep
@@ -553,6 +565,53 @@ declareMigration =
                 |]
             pure (dec : inst)
     }
+
+-- | Declare a migration from a directory.
+--
+-- Expected directory structure:
+-- "./migrations/NAME/up.sql" - SQL to perform on migration
+-- "./migrations/NAME/down.sql" - SQL to perform on rollback
+declareMigrationFromDirectory :: Text -> TH.DecsQ
+declareMigrationFromDirectory name = do
+  qtype <- TH.newName (Text.unpack name)
+  qconstr <- TH.newName (Text.unpack name)
+  dec <- TH.dataD (pure []) qtype [] Nothing [TH.normalC qconstr []] [TH.derivClause (Just TH.StockStrategy) [[t|Show|]]]
+  upSql <- TH.addDependentFile upFile >> TH.runIO (Text.readFile upFile)
+  downSql <- TH.addDependentFile downFile >> TH.runIO (Text.readFile downFile)
+  inst <-
+    [d|
+      instance Migration $(TH.conT qtype) where
+        migration = $(TH.conE qconstr)
+        up _ = $(TH.lift (Text.unpack upSql))
+        down _ = $(TH.lift (Text.unpack downSql))
+      |]
+  pure (dec : inst)
+  where
+    migrationDir = "migrations/" <> name
+    upFile = Text.unpack (migrationDir <> "/up.sql")
+    downFile = Text.unpack (migrationDir <> "/down.sql")
+
+--
+-- TH.QuasiQuoter
+--   { quoteExp = undefined
+--   , quoteType = undefined
+--   , quotePat = undefined
+--   , quoteDec = \s ->
+--       case M.parse parseMigrationDesc "hasql-mover" (Text.pack s) of
+--         Left err -> error (M.errorBundlePretty err)
+--         Right MigrationDesc {name, up, down} -> do
+--           qtype <- TH.newName (Text.unpack name)
+--           qconstr <- TH.newName (Text.unpack name)
+--           dec <- TH.dataD (pure []) qtype [] Nothing [TH.normalC qconstr []] [TH.derivClause (Just TH.StockStrategy) [[t|Show|]]]
+--           inst <-
+--             [d|
+--               instance Migration $(TH.conT qtype) where
+--                 migration = $(TH.conE qconstr)
+--                 up _ = $(TH.lift (Text.unpack up))
+--                 down _ = $(TH.lift (Text.unpack down))
+--               |]
+--           pure (dec : inst)
+--   }
 
 -- Parsing for declareMigration
 ----------------------------------------

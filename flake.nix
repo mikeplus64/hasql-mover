@@ -14,7 +14,7 @@
         overlays = [ flake-utils.overlay ];
       };
 
-      ghc = "ghc948";
+      ghc = "ghc984";
       fs = pkgs.lib.fileset;
       hlib = pkgs.haskell.lib;
       packageName = "hasql-mover";
