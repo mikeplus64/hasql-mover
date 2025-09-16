@@ -89,7 +89,7 @@ type Doc = R.Doc AnsiStyle
 prettyPending :: PendingMigration -> Doc
 prettyPending PendingMigration {migration} =
   R.vsep
-    [ "Pending " <+> R.viaShow migration
+    [ "Pending " <+> R.pretty (migrationName migration)
     , R.annotate (colorDull Green) "[up]"
     , R.pretty (up migration)
     , R.hardline
@@ -98,7 +98,7 @@ prettyPending PendingMigration {migration} =
 prettyUp :: UpMigration -> Doc
 prettyUp UpMigration {migration, executedAt} =
   R.vsep
-    [ "Up " <+> R.viaShow migration <+> "executed at" <+> R.viaShow executedAt
+    [ "Up " <+> R.pretty (migrationName migration) <+> "executed at" <+> R.viaShow executedAt
     , R.annotate (colorDull Green) "[up]"
     , R.pretty (up migration)
     , R.hardline
@@ -107,7 +107,7 @@ prettyUp UpMigration {migration, executedAt} =
 prettyDivergent :: DivergentMigration -> Doc
 prettyDivergent DivergentMigration {migration, oldUp, executedAt} =
   R.vsep
-    [ "Divergent " <+> R.viaShow migration <+> "executed at" <+> R.viaShow executedAt
+    [ "Divergent " <+> R.pretty (migrationName migration) <+> "executed at" <+> R.viaShow executedAt
     , R.annotate (colorDull Green) "[up/new]"
     , R.pretty (up migration)
     , R.hardline
@@ -119,7 +119,7 @@ prettyDivergent DivergentMigration {migration, oldUp, executedAt} =
 prettyRollback :: (Migration m) => Rollback m -> Doc
 prettyRollback (Rollback m) =
   R.vsep
-    [ "Rollback of" <+> R.viaShow m
+    [ "Rollback of" <+> R.pretty (migrationName m)
     , ""
     , R.annotate (colorDull Green) "[down]"
     , R.pretty (down m)
@@ -398,14 +398,14 @@ prettyMigrationError = \case
   MigrationCheckError qe -> "Check error" <+> prettyQueryError qe
   MigrationUpError pending qe -> "Up error" <+> prettyPending pending <+> prettyQueryError qe
   MigrationDownError up qe -> "Down error" <+> prettyUp up <+> prettyQueryError qe
-  MigrationForceUpError (SomeMigration m) qe -> "Forced up error" <+> R.viaShow m <+> prettyQueryError qe
-  MigrationForceDownError (SomeMigration m) qe -> "Forced down error" <+> R.viaShow m <+> prettyQueryError qe
+  MigrationForceUpError (SomeMigration m) qe -> "Forced up error" <+> R.pretty (migrationName m) <+> prettyQueryError qe
+  MigrationForceDownError (SomeMigration m) qe -> "Forced down error" <+> R.pretty (migrationName m) <+> prettyQueryError qe
   MigrationDivergentDownError up qe -> "Divergent down error" <+> prettyDivergent up <+> prettyQueryError qe
   MigrationConnectError connerr -> "Connection error" <+> R.viaShow connerr
   MigrationNothingToRollback -> "Nothing to roll back"
   MigrationGotDivergents -> "Divergent migrations"
   MigrationException se -> R.viaShow se
-  MigrationNotFound name -> "Migration not found:" <+> R.viaShow name
+  MigrationNotFound name -> "Migration not found:" <+> R.pretty name
   where
     prettyQueryError = \case
       Sql.QueryError bs params cmderr ->
@@ -538,11 +538,11 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
     ppExecAt e = fromString (Time.formatTime Time.defaultTimeLocale "%FT%R" e)
 
     ppUp UpMigration {migration, executedAt} =
-      R.hsep [title color Green ("[=] Up" <+> ppExecAt executedAt), R.align (R.viaShow migration)]
+      R.hsep [title color Green ("[=] Up" <+> ppExecAt executedAt), R.align (R.pretty (migrationName migration))]
     ppDivergent DivergentMigration {migration, executedAt} =
-      R.hsep [title color Red ("[d] Up" <+> ppExecAt executedAt), R.align (R.viaShow migration)]
+      R.hsep [title color Red ("[d] Up" <+> ppExecAt executedAt), R.align (R.pretty (migrationName migration))]
     ppPending PendingMigration {migration} =
-      R.hsep [title colorDull Blue "[ ] Pending            ", R.align (R.viaShow migration)]
+      R.hsep [title colorDull Blue "[ ] Pending            ", R.align (R.pretty (migrationName migration))]
 
     errBy f a = withExceptT f (ExceptT a)
     wrapQuery f p = do
