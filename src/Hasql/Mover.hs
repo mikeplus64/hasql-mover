@@ -127,10 +127,16 @@ prettyRollback (Rollback m) =
     ]
 
 instance Show PendingMigration where
-  showsPrec p (PendingMigration m) = showParen (p > 10) (showString "PendingMigration " . showsPrec 11 m)
+  showsPrec p (PendingMigration m) =
+    showParen
+      (p > 10)
+      (showString "PendingMigration " . showString (Text.unpack (migrationName m)))
 
 instance Show UpMigration where
-  showsPrec p (UpMigration m e) = showParen (p > 10) (showString "UpMigration " . showsPrec 11 e . showString " " . showsPrec 11 m)
+  showsPrec p (UpMigration m e) =
+    showParen
+      (p > 10)
+      (showString "UpMigration " . showsPrec 11 e . showString " " . showString (Text.unpack (migrationName m)))
 
 data CheckedMigrations names = CheckedMigrations
   { ups :: [UpMigration]
@@ -139,7 +145,7 @@ data CheckedMigrations names = CheckedMigrations
   }
 
 -- | A mapping from a singleton migration name to its up and down SQL
-class (Typeable a, Show a) => Migration a where
+class (Typeable a) => Migration a where
   -- | The name for this migration
   migration :: a
 
@@ -199,6 +205,7 @@ newtype Rollback m = Rollback m
 
 instance (Migration m) => Migration (Rollback m) where
   migration = Rollback migration
+  migrationName m = "Rollback " <> migrationName m
   up (Rollback m) = down m
   down (Rollback m) = up m
 
@@ -456,7 +463,7 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
     runPending m = do
       putDoc (prettyPending (PendingMigration m))
       runSession $ Tx.transaction Tx.Serializable Tx.Write do
-        Tx.sql $ Text.encodeUtf8 $ up m
+        Tx.sql (Text.encodeUtf8 (up m))
         Tx.statement
           (migrationName m, up m, down m)
           [Sql.singletonStatement|
@@ -468,7 +475,7 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
     runRollback m downSql = do
       putDoc (prettyRollback (Rollback m))
       runSession $ Tx.transaction Tx.Serializable Tx.Write do
-        Tx.sql $ Text.encodeUtf8 downSql
+        Tx.sql (Text.encodeUtf8 downSql)
         case cast m of
           Just BaseMigration -> pure ()
           Nothing -> Tx.statement (migrationName m) [Sql.resultlessStatement|DELETE FROM hasql_mover_migration WHERE name = ($1::text)|]
@@ -484,7 +491,7 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
         findIt :: (Migration m) => UnknownMigration m -> State (Maybe SomeMigration) ()
         findIt (UnknownMigration m) =
           when
-            (Text.pack (show m) == name)
+            (migrationName m == name)
             (put (Just (SomeMigration m)))
 
         allMigrations = cpure_NP (Proxy @Migration) (UnknownMigration migration) :: NP UnknownMigration migrations
