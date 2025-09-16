@@ -5,6 +5,7 @@ module Hasql.Mover (
   -- * Declaration
   declareMigration,
   declareMigrationFromDirectory,
+  declareSMigrationFromDirectory,
 
   -- * Checking and running migrations
 
@@ -23,6 +24,10 @@ module Hasql.Mover (
   UpMigration (..),
   PendingMigration (..),
   DivergentMigration (..),
+
+  -- ** Utilities
+  RenamedMigration (..),
+  SMigration (..),
 
   -- ** Settings
   MigrationDB (..),
@@ -52,6 +57,7 @@ import Data.Time (UTCTime)
 import Data.Time.Format qualified as Time
 import Data.Typeable (Typeable, cast)
 import Data.Void (Void)
+import GHC.TypeLits (KnownSymbol, Symbol, symbolVal)
 import Hasql.Connection qualified as Sql
 import Hasql.Session qualified as Sql
 import Hasql.TH qualified as Sql
@@ -137,14 +143,36 @@ class (Typeable a, Show a) => Migration a where
   -- | The name for this migration
   migration :: a
 
+  migrationName :: a -> Text
+  default migrationName :: (Show a) => a -> Text
+  migrationName = Text.pack . show
+
   -- | How to run this migration
   up :: a -> Text
 
   -- | How to rollback this migration
   down :: a -> Text
 
-migrationName :: (Migration a) => a -> Text
-migrationName = Text.pack . show
+--------------------------------------------------------------------------------
+-- Utility migrations
+
+newtype RenamedMigration (newName :: Symbol) m = RenamedMigration m
+  deriving stock (Show)
+
+instance (KnownSymbol newName, Migration m) => Migration (RenamedMigration newName m) where
+  migration = RenamedMigration (migration @m)
+  migrationName _ = Text.pack (symbolVal @newName Proxy)
+  up (RenamedMigration m) = up m
+  down (RenamedMigration m) = down m
+
+data SMigration (name :: Symbol) (up :: Symbol) (down :: Symbol) = SMigration
+  deriving stock (Show)
+
+instance (KnownSymbol name, KnownSymbol up, KnownSymbol down) => Migration (SMigration name up down) where
+  migration = SMigration
+  migrationName _ = Text.pack (symbolVal @name Proxy)
+  up _ = Text.strip (Text.pack (symbolVal @up Proxy))
+  down _ = Text.strip (Text.pack (symbolVal @down Proxy))
 
 --------------------------------------------------------------------------------
 -- The base migration
@@ -586,6 +614,22 @@ declareMigrationFromDirectory name = do
         down _ = $(TH.lift (Text.unpack downSql))
       |]
   pure (dec : inst)
+  where
+    migrationDir = "migrations/" <> name
+    upFile = Text.unpack (migrationDir <> "/up.sql")
+    downFile = Text.unpack (migrationDir <> "/down.sql")
+
+-- | Declare a migration (via 'SMigration') from a directory.
+--
+-- Expected directory structure:
+-- "./migrations/NAME/up.sql" - SQL to perform on migration
+-- "./migrations/NAME/down.sql" - SQL to perform on rollback
+declareSMigrationFromDirectory :: Text -> TH.TypeQ
+declareSMigrationFromDirectory name = do
+  let text = TH.litT . TH.strTyLit . Text.unpack
+  upSql <- Text.strip <$> (TH.addDependentFile upFile >> TH.runIO (Text.readFile upFile))
+  downSql <- Text.strip <$> (TH.addDependentFile downFile >> TH.runIO (Text.readFile downFile))
+  [t|SMigration $(text name) $(text upSql) $(text downSql)|]
   where
     migrationDir = "migrations/" <> name
     upFile = Text.unpack (migrationDir <> "/up.sql")
