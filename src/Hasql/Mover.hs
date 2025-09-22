@@ -70,6 +70,7 @@ import Options.Applicative qualified as O
 import Prettyprinter ((<+>))
 import Prettyprinter qualified as R
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, colorDull, putDoc)
+import System.Directory (withCurrentDirectory)
 import Text.Megaparsec qualified as M
 import Text.Megaparsec.Char qualified as M
 import Text.Megaparsec.Char.Lexer qualified as L
@@ -153,6 +154,9 @@ class (Typeable a) => Migration a where
   default migrationName :: (Show a) => a -> Text
   migrationName = Text.pack . show
 
+  directory :: a -> Maybe FilePath
+  directory _ = Nothing
+
   -- | How to run this migration
   up :: a -> Text
 
@@ -171,14 +175,24 @@ instance (KnownSymbol newName, Migration m) => Migration (RenamedMigration newNa
   up (RenamedMigration m) = up m
   down (RenamedMigration m) = down m
 
-data SMigration (name :: Symbol) (up :: Symbol) (down :: Symbol) = SMigration
+data SMigration (name :: Symbol) (dir :: Maybe Symbol) (up :: Symbol) (down :: Symbol) = SMigration
   deriving stock (Show)
 
-instance (KnownSymbol name, KnownSymbol up, KnownSymbol down) => Migration (SMigration name up down) where
+instance (KnownSymbol name, KnownSymbol up, KnownSymbol down, KnownMaybeSymbol dir, Typeable dir) => Migration (SMigration name dir up down) where
   migration = SMigration
   migrationName _ = Text.pack (symbolVal @name Proxy)
+  directory _ = symbolMaybeVal (Proxy :: Proxy dir)
   up _ = Text.strip (Text.pack (symbolVal @up Proxy))
   down _ = Text.strip (Text.pack (symbolVal @down Proxy))
+
+class KnownMaybeSymbol (k :: Maybe Symbol) where
+  symbolMaybeVal :: Proxy k -> Maybe String
+
+instance KnownMaybeSymbol 'Nothing where
+  symbolMaybeVal _ = Nothing
+
+instance (KnownSymbol dir) => KnownMaybeSymbol ('Just dir) where
+  symbolMaybeVal _ = Just (symbolVal @dir Proxy)
 
 --------------------------------------------------------------------------------
 -- The base migration
@@ -459,22 +473,25 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
     runSession :: (MonadIO m) => Sql.Session a -> m (Either Sql.SessionError a)
     runSession s = liftIO (run s db)
 
+    runInCorrectDirectory :: (Migration m) => m -> IO a -> IO a
+    runInCorrectDirectory = maybe id withCurrentDirectory . directory
+
     runPending :: (Migration m) => m -> IO (Either Sql.SessionError UTCTime)
     runPending m = do
       putDoc (prettyPending (PendingMigration m))
-      runSession $ Tx.transaction Tx.Serializable Tx.Write do
+      runInCorrectDirectory m . runSession $ Tx.transaction Tx.Serializable Tx.Write do
         Tx.sql (Text.encodeUtf8 (up m))
         Tx.statement
           (migrationName m, up m, down m)
           [Sql.singletonStatement|
-              INSERT INTO hasql_mover_migration (name, up, down) VALUES($1::text, $2::text, $3::text)
-              RETURNING executed_at::timestamptz
-            |]
+            INSERT INTO hasql_mover_migration (name, up, down) VALUES($1::text, $2::text, $3::text)
+            RETURNING executed_at::timestamptz
+          |]
 
     runRollback :: (Migration m) => m -> Text -> IO (Either Sql.SessionError ())
     runRollback m downSql = do
       putDoc (prettyRollback (Rollback m))
-      runSession $ Tx.transaction Tx.Serializable Tx.Write do
+      runInCorrectDirectory m . runSession $ Tx.transaction Tx.Serializable Tx.Write do
         Tx.sql (Text.encodeUtf8 downSql)
         case cast m of
           Just BaseMigration -> pure ()
@@ -636,7 +653,7 @@ smigrationFromDirectory name = do
   let text = TH.litT . TH.strTyLit . Text.unpack
   upSql <- Text.strip <$> (TH.addDependentFile upFile >> TH.runIO (Text.readFile upFile))
   downSql <- Text.strip <$> (TH.addDependentFile downFile >> TH.runIO (Text.readFile downFile))
-  [t|SMigration $(text name) $(text upSql) $(text downSql)|]
+  [t|SMigration ('Just $(text migrationDir)) $(text name) $(text upSql) $(text downSql)|]
   where
     migrationDir = "migrations/" <> name
     upFile = Text.unpack (migrationDir <> "/up.sql")
