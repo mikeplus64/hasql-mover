@@ -5,7 +5,7 @@ module Hasql.Mover (
   -- * Declaration
   declareMigration,
   declareMigrationFromDirectory,
-  smigrationFromDirectory,
+  migrationFromDirectory,
 
   -- * Checking and running migrations
 
@@ -648,8 +648,8 @@ declareMigrationFromDirectory name = do
 -- Expected directory structure:
 -- "./migrations/NAME/up.sql" - SQL to perform on migration
 -- "./migrations/NAME/down.sql" - SQL to perform on rollback
-smigrationFromDirectory :: Text -> TH.TypeQ
-smigrationFromDirectory name = do
+migrationFromDirectory :: Text -> TH.TypeQ
+migrationFromDirectory name = do
   let text = TH.litT . TH.strTyLit . Text.unpack
   upSql <- Text.strip <$> (TH.addDependentFile upFile >> TH.runIO (Text.readFile upFile))
   downSql <- Text.strip <$> (TH.addDependentFile downFile >> TH.runIO (Text.readFile downFile))
