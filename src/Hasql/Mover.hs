@@ -653,7 +653,7 @@ migrationFromDirectory name = do
   let text = TH.litT . TH.strTyLit . Text.unpack
   upSql <- Text.strip <$> (TH.addDependentFile upFile >> TH.runIO (Text.readFile upFile))
   downSql <- Text.strip <$> (TH.addDependentFile downFile >> TH.runIO (Text.readFile downFile))
-  [t|SMigration ('Just $(text migrationDir)) $(text name) $(text upSql) $(text downSql)|]
+  [t|SMigration $(text name) ('Just $(text migrationDir)) $(text upSql) $(text downSql)|]
   where
     migrationDir = "migrations/" <> name
     upFile = Text.unpack (migrationDir <> "/up.sql")
