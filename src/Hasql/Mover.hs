@@ -59,6 +59,9 @@ import Data.Typeable (Typeable, cast)
 import Data.Void (Void)
 import GHC.TypeLits (KnownSymbol, Symbol, symbolVal)
 import Hasql.Connection qualified as Sql
+import Hasql.Connection.Setting qualified
+import Hasql.Connection.Setting qualified as Sql
+import Hasql.Connection.Setting.Connection qualified
 import Hasql.Session qualified as Sql
 import Hasql.TH qualified as Sql
 import Hasql.Transaction qualified as Tx
@@ -313,7 +316,7 @@ data MigrationDB
 
 -- | Create a 'MigrationDB' from a hasql settings - a PostgreSQL connection
 -- string as of writing
-migrationDBFromSettings :: Sql.Settings -> MigrationDB
+migrationDBFromSettings :: [Sql.Setting] -> MigrationDB
 migrationDBFromSettings connstr =
   MigrationDB
     { acquire = Sql.acquire connstr
@@ -350,7 +353,13 @@ data MigrationCmd
 hasqlMoverOpts :: O.Parser MigrationCli
 hasqlMoverOpts =
   MigrationCli
-    <$> (migrationDBFromSettings . Text.encodeUtf8 . Text.pack <$> O.strOption (O.long "db" <> O.metavar "DB"))
+    <$> ( migrationDBFromSettings
+            . pure
+            . Hasql.Connection.Setting.connection
+            . Hasql.Connection.Setting.Connection.string -- TODO this will break again soon
+            . Text.pack
+            <$> O.strOption (O.long "db" <> O.metavar "DB")
+        )
     <*> O.subparser
       ( mconcat
           [ O.command "up" (O.info (pure MigrateUp) (O.progDesc "Perform any pending migrations"))
