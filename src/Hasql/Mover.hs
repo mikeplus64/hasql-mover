@@ -73,7 +73,7 @@ import Options.Applicative qualified as O
 import Prettyprinter ((<+>))
 import Prettyprinter qualified as R
 import Prettyprinter.Render.Terminal (AnsiStyle, Color (..), color, colorDull, putDoc)
-import System.Directory (withCurrentDirectory)
+import System.Directory (doesDirectoryExist, withCurrentDirectory)
 import Text.Megaparsec qualified as M
 import Text.Megaparsec.Char qualified as M
 import Text.Megaparsec.Char.Lexer qualified as L
@@ -483,7 +483,16 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
     runSession s = liftIO (run s db)
 
     runInCorrectDirectory :: (Migration m) => m -> IO a -> IO a
-    runInCorrectDirectory = maybe id withCurrentDirectory . directory
+    runInCorrectDirectory =
+      maybe
+        id
+        ( \dir io -> do
+            exists <- doesDirectoryExist dir
+            if exists
+              then withCurrentDirectory dir io
+              else io
+        )
+        . directory
 
     runPending :: (Migration m) => m -> IO (Either Sql.SessionError UTCTime)
     runPending m = do
