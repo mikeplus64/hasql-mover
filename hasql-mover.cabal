@@ -19,7 +19,7 @@ extra-doc-files: CHANGELOG.md
 library
   exposed-modules: Hasql.Mover
   build-depends:
-    base >=4.16 && <4.20,
+    base >=4.16 && <4.22,
     hasql ^>=1.9,
     hasql-th ^>=0.4,
     hasql-transaction >=1.0 && <1.3,
