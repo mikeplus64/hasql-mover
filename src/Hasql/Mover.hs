@@ -389,8 +389,8 @@ defaultPerformMigrationOpts =
   PerformMigrationOpts
     { beforeUp = const (pure (Right ()))
     , beforeDown = const (pure (Right ()))
-    , afterUp = const pass
-    , afterDown = const pass
+    , afterUp = const (pure ())
+    , afterDown = const (pure ())
     }
 
 -- | Main function for running hasql-mover migrations
