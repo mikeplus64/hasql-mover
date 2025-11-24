@@ -11,6 +11,7 @@ module Hasql.Mover (
 
   -- ** Main functions
   hasqlMover,
+  hasqlMoverWith,
   performMigrations,
 
   -- *** Options
@@ -41,10 +42,11 @@ import Control.Exception qualified as E
 import Control.Monad (forM_, void, when)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.Except (ExceptT (..), runExceptT, throwE, withExceptT)
+import Control.Monad.Trans.Except (ExceptT (..), mapExceptT, runExceptT, throwE, withExceptT)
 import Control.Monad.Trans.Resource (allocate, runResourceT)
 import Control.Monad.Trans.State.Strict (State, StateT (..), execState, execStateT, gets, modify', put)
 import Data.Char (isSpace)
+import Data.Functor ((<&>))
 import Data.Proxy (Proxy (..))
 import Data.SOP.Constraint (All)
 import Data.SOP.NP (NP (..), cpure_NP, ctraverse__NP, traverse__NP)
@@ -53,7 +55,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as Text
 import Data.Text.IO qualified as Text
-import Data.Time (UTCTime)
+import Data.Time (UTCTime, getCurrentTime)
 import Data.Time.Format qualified as Time
 import Data.Typeable (Typeable, cast)
 import Data.Void (Void)
@@ -377,6 +379,20 @@ hasqlMoverOpts =
         <$> O.switch (O.long "undo-diverging" <> O.short 'u' <> O.help "Can we undo a diverging migration?")
         <*> O.switch (O.long "divergent-down-from-old" <> O.short 'o' <> O.help "Use the 'down' definition for a divergent migration from its original definition, when it was initially ran")
 
+data PerformMigrationOpts = PerformMigrationOpts
+  { beforeUp, beforeDown :: forall m. (Migration m) => m -> IO (Either Text ())
+  , afterUp, afterDown :: forall m. (Migration m) => m -> IO ()
+  }
+
+defaultPerformMigrationOpts :: PerformMigrationOpts
+defaultPerformMigrationOpts =
+  PerformMigrationOpts
+    { beforeUp = const (pure (Right ()))
+    , beforeDown = const (pure (Right ()))
+    , afterUp = const pass
+    , afterDown = const pass
+    }
+
 -- | Main function for running hasql-mover migrations
 --
 -- Example usage:
@@ -395,20 +411,23 @@ hasqlMoverOpts =
 -- type Migrations = '[V0]
 --
 -- main :: IO ()
--- main = hasqlMoverMain @Migrations
+-- main = hasqlMover @Migrations
 -- @
-hasqlMover :: forall ms. (All Migration ms) => IO ()
-hasqlMover = do
+hasqlMoverWith :: forall ms. (All Migration ms) => PerformMigrationOpts -> IO ()
+hasqlMoverWith opts = do
   cli <-
     O.execParser
       ( O.info
           (hasqlMoverOpts O.<**> O.helper)
           (O.fullDesc <> O.progDesc "Perform or check hasql-mover migrations")
       )
-  result <- performMigrations @ms cli
+  result <- performMigrations @ms opts cli
   case result of
     Right () -> pure ()
     Left err -> putDoc (prettyMigrationError err <+> R.softline)
+
+hasqlMover :: forall ms. (All Migration ms) => IO ()
+hasqlMover = hasqlMoverWith defaultPerformMigrationOpts
 
 data MigrationError
   = MigrationCheckError !Sql.SessionError
@@ -422,6 +441,8 @@ data MigrationError
   | MigrationGotDivergents
   | MigrationException !E.SomeException
   | MigrationNotFound !Text
+  | MigrationBeforeUpError !Text
+  | MigrationBeforeDownError !Text
 
 prettyMigrationError :: MigrationError -> Doc
 prettyMigrationError = \case
@@ -436,6 +457,8 @@ prettyMigrationError = \case
   MigrationGotDivergents -> "Divergent migrations"
   MigrationException se -> R.viaShow se
   MigrationNotFound name -> "Migration not found:" <+> R.pretty name
+  MigrationBeforeDownError err -> "Before down error:" <+> R.pretty err
+  MigrationBeforeUpError err -> "Before up error:" <+> R.pretty err
   where
     prettyQueryError = \case
       Sql.QueryError bs params cmderr ->
@@ -469,9 +492,10 @@ prettyMigrationError = \case
 performMigrations
   :: forall migrations
    . (All Migration migrations)
-  => MigrationCli
+  => PerformMigrationOpts
+  -> MigrationCli
   -> IO (Either MigrationError ())
-performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} = runResourceT $ runExceptT do
+performMigrations PerformMigrationOpts {beforeUp, beforeDown, afterUp, afterDown} MigrationCli {db = MigrationDB {acquire, release, run}, cmd} = runResourceT $ runExceptT do
   (_releaseKey, mdb) <- allocate acquire \case
     Left _ -> pure ()
     Right db -> release db
@@ -494,10 +518,11 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
         )
         . directory
 
-    runPending :: (Migration m) => m -> IO (Either Sql.SessionError UTCTime)
-    runPending m = do
-      putDoc (prettyPending (PendingMigration m))
-      runInCorrectDirectory m . runSession $ Tx.transaction Tx.Serializable Tx.Write do
+    runPending :: (Migration m, MonadIO io) => m -> ExceptT MigrationError io UTCTime
+    runPending m = mapExceptT catchLiftIO do
+      liftIO . putDoc . prettyPending $ PendingMigration m
+      withExceptT MigrationBeforeUpError (ExceptT (beforeUp m))
+      t <- withExceptT (MigrationUpError (PendingMigration m)) . ExceptT . runInCorrectDirectory m . runSession $ Tx.transaction Tx.Serializable Tx.Write do
         Tx.sql (Text.encodeUtf8 (up m))
         Tx.statement
           (migrationName m, up m, down m)
@@ -505,15 +530,26 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
             INSERT INTO hasql_mover_migration (name, up, down) VALUES($1::text, $2::text, $3::text)
             RETURNING executed_at::timestamptz
           |]
+      liftIO (afterUp m)
+      pure t
 
-    runRollback :: (Migration m) => m -> Text -> IO (Either Sql.SessionError ())
-    runRollback m downSql = do
-      putDoc (prettyRollback (Rollback m))
-      runInCorrectDirectory m . runSession $ Tx.transaction Tx.Serializable Tx.Write do
+    runRollback :: (Migration m, MonadIO io) => m -> UTCTime -> Text -> ExceptT MigrationError io ()
+    runRollback m u downSql = mapExceptT catchLiftIO do
+      liftIO . putDoc . prettyRollback $ Rollback m
+      withExceptT MigrationBeforeDownError (ExceptT (beforeDown m))
+      t <- withExceptT (MigrationDownError (UpMigration m u)) . ExceptT . runInCorrectDirectory m . runSession $ Tx.transaction Tx.Serializable Tx.Write do
         Tx.sql (Text.encodeUtf8 downSql)
         case cast m of
           Just BaseMigration -> pure ()
           Nothing -> Tx.statement (migrationName m) [Sql.resultlessStatement|DELETE FROM hasql_mover_migration WHERE name = ($1::text)|]
+      liftIO (afterDown m)
+      pure t
+
+    catchLiftIO :: (MonadIO m) => IO (Either MigrationError a) -> m (Either MigrationError a)
+    catchLiftIO m = liftIO do
+      E.try m <&> \case
+        Left err -> Left (MigrationException err)
+        Right a -> a
 
   checked@CheckedMigrations {ups, divergents, pendings} <- check
 
@@ -537,30 +573,29 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
     -- Up
     MigrateUp
       | null divergents -> do
-          forM_ pendings \p@PendingMigration {migration} -> do
-            _ <- wrapQuery (MigrationUpError p) (runPending migration)
+          forM_ pendings \PendingMigration {migration} -> do
+            _ <- runPending migration
             liftIO . putDoc . ppStatus "New migrations status:" =<< check
       | otherwise -> throwE MigrationGotDivergents
     -- Down
     MigrateDown {undoDivergents, divergentUseOldDown}
       | null ups && (null divergents && not undoDivergents) -> throwE MigrationNothingToRollback
       | undoDivergents && not (null divergents)
-      , u@DivergentMigration {migration, oldDown} <- last divergents ->
-          wrapQuery
-            (MigrationDivergentDownError u)
-            (runRollback migration (if divergentUseOldDown then oldDown else down migration))
+      , DivergentMigration {migration, executedAt, oldDown} <- last divergents ->
+          runRollback migration executedAt (if divergentUseOldDown then oldDown else down migration)
       | not (null divergents) ->
           throwE MigrationGotDivergents
-      | u@UpMigration {migration} <- last ups -> do
-          wrapQuery (MigrationDownError u) (runRollback migration (down migration))
+      | UpMigration {migration, executedAt} <- last ups -> do
+          runRollback migration executedAt (down migration)
           liftIO . putDoc . ppStatus "New migrations status:" =<< check
     -- Forcing down
     MigrateForceDown nameText | Just (SomeMigration m) <- findMigrationByName nameText -> do
-      wrapQuery (MigrationForceDownError (SomeMigration m)) (runRollback m (down m))
+      now <- liftIO getCurrentTime
+      runRollback m now (down m)
     MigrateForceDown nameText -> throwE (MigrationNotFound nameText)
     -- Forcing up
     MigrateForceUp nameText | Just (SomeMigration m) <- findMigrationByName nameText -> void do
-      wrapQuery (MigrationForceUpError (SomeMigration m)) (runPending m)
+      runPending m
     MigrateForceUp nameText -> throwE (MigrationNotFound nameText)
   where
     ppStatus :: Text -> CheckedMigrations m -> Doc
@@ -587,12 +622,6 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
       R.hsep [title colorDull Blue "[ ] Pending            ", R.align (R.pretty (migrationName migration))]
 
     errBy f a = withExceptT f (ExceptT a)
-    wrapQuery f p = do
-      r <- liftIO (E.try @E.SomeException p)
-      case r of
-        Left se -> throwE (MigrationException se)
-        Right (Left e) -> throwE (f e)
-        Right (Right a) -> pure a
 
 --------------------------------------------------------------------------------
 -- Declaring migrations
