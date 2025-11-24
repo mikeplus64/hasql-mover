@@ -95,7 +95,7 @@ prettyPending PendingMigration {migration} =
   R.vsep
     [ "Pending " <+> R.pretty (migrationName migration)
     , R.annotate (colorDull Green) "[up]"
-    , R.pretty (up migration)
+    , R.pretty (upSql migration)
     , R.hardline
     ]
 
@@ -104,7 +104,7 @@ prettyUp UpMigration {migration, executedAt} =
   R.vsep
     [ "Up " <+> R.pretty (migrationName migration) <+> "executed at" <+> R.viaShow executedAt
     , R.annotate (colorDull Green) "[up]"
-    , R.pretty (up migration)
+    , R.pretty (upSql migration)
     , R.hardline
     ]
 
@@ -113,7 +113,7 @@ prettyDivergent DivergentMigration {migration, oldUp, executedAt} =
   R.vsep
     [ "Divergent " <+> R.pretty (migrationName migration) <+> "executed at" <+> R.viaShow executedAt
     , R.annotate (colorDull Green) "[up/new]"
-    , R.pretty (up migration)
+    , R.pretty (upSql migration)
     , R.hardline
     , R.annotate (colorDull Green) "[up/old]"
     , R.pretty oldUp
@@ -126,7 +126,7 @@ prettyRollback (Rollback m) =
     [ "Rollback of" <+> R.pretty (migrationName m)
     , ""
     , R.annotate (colorDull Green) "[down]"
-    , R.pretty (down m)
+    , R.pretty (downSql m)
     , R.hardline
     ]
 
@@ -160,11 +160,27 @@ class (Typeable a) => Migration a where
   directory :: a -> Maybe FilePath
   directory _ = Nothing
 
+  version :: Int
+
   -- | How to run this migration
-  up :: a -> Text
+  upSql :: a -> Text
 
   -- | How to rollback this migration
-  down :: a -> Text
+  downSql :: a -> Text
+
+  up :: a -> IO (Tx.Transaction ())
+  up =
+    pure
+      . Tx.sql
+      . Text.encodeUtf8
+      . upSql
+
+  down :: a -> IO (Tx.Transaction ())
+  down =
+    pure
+      . Tx.sql
+      . Text.encodeUtf8
+      . downSql
 
 --------------------------------------------------------------------------------
 -- Utility migrations
@@ -175,8 +191,8 @@ newtype RenamedMigration (newName :: Symbol) m = RenamedMigration m
 instance (KnownSymbol newName, Migration m) => Migration (RenamedMigration newName m) where
   migration = RenamedMigration (migration @m)
   migrationName _ = Text.pack (symbolVal @newName Proxy)
-  up (RenamedMigration m) = up m
-  down (RenamedMigration m) = down m
+  upSql (RenamedMigration m) = upSql m
+  downSql (RenamedMigration m) = downSql m
 
 data SMigration (name :: Symbol) (dir :: Maybe Symbol) (up :: Symbol) (down :: Symbol) = SMigration
   deriving stock (Show)
@@ -185,8 +201,8 @@ instance (KnownSymbol name, KnownSymbol up, KnownSymbol down, KnownMaybeSymbol d
   migration = SMigration
   migrationName _ = Text.pack (symbolVal @name Proxy)
   directory _ = symbolMaybeVal (Proxy :: Proxy dir)
-  up _ = Text.strip (Text.pack (symbolVal @up Proxy))
-  down _ = Text.strip (Text.pack (symbolVal @down Proxy))
+  upSql _ = Text.strip (Text.pack (symbolVal @up Proxy))
+  downSql _ = Text.strip (Text.pack (symbolVal @down Proxy))
 
 class KnownMaybeSymbol (k :: Maybe Symbol) where
   symbolMaybeVal :: Proxy k -> Maybe String
@@ -206,7 +222,7 @@ data BaseMigration = BaseMigration
 
 instance Migration BaseMigration where
   migration = BaseMigration
-  up _ =
+  upSql _ =
     "CREATE TABLE hasql_mover_migration (\n\
     \  id serial NOT NULL,\n\
     \  name text NOT NULL,\n\
@@ -214,7 +230,7 @@ instance Migration BaseMigration where
     \  down text NOT NULL,\n\
     \  executed_at timestamptz NOT NULL DEFAULT now()\n\
     \)"
-  down _ =
+  downSql _ =
     "DROP TABLE hasql_mover_migration CASCADE"
 
 newtype Rollback m = Rollback m
@@ -223,8 +239,8 @@ newtype Rollback m = Rollback m
 instance (Migration m) => Migration (Rollback m) where
   migration = Rollback migration
   migrationName m = "Rollback " <> migrationName m
-  up (Rollback m) = down m
-  down (Rollback m) = up m
+  upSql (Rollback m) = downSql m
+  downSql (Rollback m) = upSql m
 
 --------------------------------------------------------------------------------
 
@@ -284,7 +300,7 @@ checkMigrations =
                 |]
           case r of
             Just (oldUp, oldDown, executedAt)
-              | oldUp == up m -> addUp m executedAt
+              | oldUp == upSql m -> addUp m executedAt
               | otherwise -> addDivergent m executedAt oldUp oldDown
             Nothing -> addPending m
         else addPending m
@@ -497,20 +513,22 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
     runPending :: (Migration m) => m -> IO (Either Sql.SessionError UTCTime)
     runPending m = do
       putDoc (prettyPending (PendingMigration m))
+      runUp <- up m
       runInCorrectDirectory m . runSession $ Tx.transaction Tx.Serializable Tx.Write do
-        Tx.sql (Text.encodeUtf8 (up m))
+        runUp
         Tx.statement
-          (migrationName m, up m, down m)
+          (migrationName m, upSql m, downSql m)
           [Sql.singletonStatement|
             INSERT INTO hasql_mover_migration (name, up, down) VALUES($1::text, $2::text, $3::text)
             RETURNING executed_at::timestamptz
           |]
 
-    runRollback :: (Migration m) => m -> Text -> IO (Either Sql.SessionError ())
-    runRollback m downSql = do
+    runRollback :: (Migration m) => m -> IO (Either Sql.SessionError ())
+    runRollback m = do
       putDoc (prettyRollback (Rollback m))
+      runDown <- down m
       runInCorrectDirectory m . runSession $ Tx.transaction Tx.Serializable Tx.Write do
-        Tx.sql (Text.encodeUtf8 downSql)
+        runDown
         case cast m of
           Just BaseMigration -> pure ()
           Nothing -> Tx.statement (migrationName m) [Sql.resultlessStatement|DELETE FROM hasql_mover_migration WHERE name = ($1::text)|]
@@ -548,20 +566,24 @@ performMigrations MigrationCli {db = MigrationDB {acquire, release, run}, cmd} =
       , u@DivergentMigration {migration, oldDown} <- last divergents ->
           wrapQuery
             (MigrationDivergentDownError u)
-            (runRollback migration (if divergentUseOldDown then oldDown else down migration))
+            ( runRollback
+                migration
+                (if divergentUseOldDown then oldDown else downSql migration)
+            )
       | not (null divergents) ->
           throwE MigrationGotDivergents
       | u@UpMigration {migration} <- last ups -> do
-          wrapQuery (MigrationDownError u) (runRollback migration (down migration))
+          wrapQuery (MigrationDownError u) (runRollback migration (downSql migration))
           liftIO . putDoc . ppStatus "New migrations status:" =<< check
     -- Forcing down
     MigrateForceDown nameText | Just (SomeMigration m) <- findMigrationByName nameText -> do
-      wrapQuery (MigrationForceDownError (SomeMigration m)) (runRollback m (down m))
+      wrapQuery (MigrationForceDownError (SomeMigration m)) (runRollback m (downSql m))
     MigrateForceDown nameText -> throwE (MigrationNotFound nameText)
     -- Forcing up
     MigrateForceUp nameText | Just (SomeMigration m) <- findMigrationByName nameText -> void do
       wrapQuery (MigrationForceUpError (SomeMigration m)) (runPending m)
-    MigrateForceUp nameText -> throwE (MigrationNotFound nameText)
+    MigrateForceUp nameText ->
+      throwE (MigrationNotFound nameText)
   where
     ppStatus :: Text -> CheckedMigrations m -> Doc
     ppStatus title CheckedMigrations {ups, divergents, pendings} =
@@ -630,8 +652,8 @@ declareMigration =
               [d|
                 instance Migration $(TH.conT qtype) where
                   migration = $(TH.conE qconstr)
-                  up _ = $(TH.lift (Text.unpack up))
-                  down _ = $(TH.lift (Text.unpack down))
+                  upSql _ = $(TH.lift (Text.unpack up))
+                  downSql _ = $(TH.lift (Text.unpack down))
                 |]
             pure (dec : inst)
     }
@@ -652,8 +674,8 @@ declareMigrationFromDirectory name = do
     [d|
       instance Migration $(TH.conT qtype) where
         migration = $(TH.conE qconstr)
-        up _ = $(TH.lift (Text.unpack upSql))
-        down _ = $(TH.lift (Text.unpack downSql))
+        upSql _ = $(TH.lift (Text.unpack upSql))
+        downSql _ = $(TH.lift (Text.unpack downSql))
       |]
   pure (dec : inst)
   where
