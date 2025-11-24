@@ -427,7 +427,7 @@ hasqlMoverWith opts = do
     Left err -> putDoc (prettyMigrationError err <+> R.softline)
 
 hasqlMover :: forall ms. (All Migration ms) => IO ()
-hasqlMover = hasqlMoverWith defaultPerformMigrationOpts
+hasqlMover = hasqlMoverWith @ms defaultPerformMigrationOpts
 
 data MigrationError
   = MigrationCheckError !Sql.SessionError
