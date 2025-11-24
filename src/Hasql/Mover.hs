@@ -13,6 +13,8 @@ module Hasql.Mover (
   hasqlMover,
   hasqlMoverWith,
   performMigrations,
+  PerformMigrationOpts (..),
+  defaultPerformMigrationOpts,
 
   -- *** Options
   MigrationCli (..),
