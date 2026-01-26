@@ -15,6 +15,7 @@ module Hasql.Mover (
   performMigrations,
   PerformMigrationOpts (..),
   defaultPerformMigrationOpts,
+  checkMigrations,
 
   -- *** Options
   MigrationCli (..),
@@ -241,6 +242,7 @@ data CheckState = CheckState
   , haveBaseTable :: Bool
   }
 
+-- | Get the current status of @hasql-mover@ migrations
 checkMigrations :: forall migrations. (All Migration migrations) => Sql.Session (CheckedMigrations (BaseMigration : migrations))
 checkMigrations =
   runCheckState do
