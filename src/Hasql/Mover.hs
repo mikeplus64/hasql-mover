@@ -456,6 +456,7 @@ data MigrationError
   | MigrationNotFound !Text
   | MigrationBeforeUpError !Text
   | MigrationBeforeDownError !Text
+  deriving (Show)
 
 prettyMigrationError :: MigrationError -> Doc
 prettyMigrationError = \case
