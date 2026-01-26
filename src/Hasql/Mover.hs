@@ -150,6 +150,12 @@ instance Show UpMigration where
       (p > 10)
       (showString "UpMigration " . showsPrec 11 e . showString " " . showString (Text.unpack (migrationName m)))
 
+instance Show DivergentMigration where
+  showsPrec p (DivergentMigration m _ _ _) =
+    showParen
+      (p > 10)
+      (showString "DivergentMigration " . showString (Text.unpack (migrationName m)))
+
 data CheckedMigrations names = CheckedMigrations
   { ups :: [UpMigration]
   , divergents :: [DivergentMigration]
