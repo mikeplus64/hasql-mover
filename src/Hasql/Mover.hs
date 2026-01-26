@@ -15,6 +15,9 @@ module Hasql.Mover (
   performMigrations,
   PerformMigrationOpts (..),
   defaultPerformMigrationOpts,
+
+  -- ** Checking
+  CheckedMigrations (..),
   checkMigrations,
 
   -- *** Options
