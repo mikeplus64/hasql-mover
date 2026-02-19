@@ -41,7 +41,8 @@ module Hasql.Mover (
   migrationDBFromSettings,
 
   -- ** Integrating into an existing "main"
-  hasqlMoverOpts,
+  hasqlMoverCliOpts,
+  hasqlMoverCliParserInfo,
 ) where
 
 import Control.Exception qualified as E
@@ -95,6 +96,9 @@ data UpMigration = forall m. (Migration m) => UpMigration {migration :: m, execu
 data DivergentMigration = forall m. (Migration m) => DivergentMigration {migration :: m, oldUp, oldDown :: Text, executedAt :: UTCTime}
 data UnknownMigration m = (Migration m) => UnknownMigration m
 data SomeMigration where SomeMigration :: (Migration m) => m -> SomeMigration
+
+instance Show SomeMigration where
+  showsPrec _ (SomeMigration m) = showString (Text.unpack (migrationName m))
 
 type Doc = R.Doc AnsiStyle
 
@@ -365,8 +369,14 @@ data MigrationCmd
     MigrateForceDown {migrationName :: Text}
 
 -- | optparse-applicative options for hasql-mover; use 'hasqlMover' to then run the parsed options
-hasqlMoverOpts :: O.Parser MigrationCli
-hasqlMoverOpts =
+hasqlMoverCliParserInfo :: O.ParserInfo MigrationCli
+hasqlMoverCliParserInfo =
+  O.info
+    (hasqlMoverCliOpts O.<**> O.helper)
+    (O.fullDesc <> O.progDesc "Perform or check hasql-mover migrations")
+
+hasqlMoverCliOpts :: O.Parser MigrationCli
+hasqlMoverCliOpts =
   MigrationCli
     <$> ( migrationDBFromSettings
             . pure
@@ -406,6 +416,13 @@ defaultPerformMigrationOpts =
     , afterDown = const (pure ())
     }
 
+hasqlMoverWith :: forall ms. (All Migration ms) => MigrationCli -> PerformMigrationOpts -> IO ()
+hasqlMoverWith cli opts = do
+  result <- performMigrations @ms opts cli
+  case result of
+    Right () -> pure ()
+    Left err -> putDoc (prettyMigrationError err <+> R.softline)
+
 -- | Main function for running hasql-mover migrations
 --
 -- Example usage:
@@ -426,21 +443,15 @@ defaultPerformMigrationOpts =
 -- main :: IO ()
 -- main = hasqlMover @Migrations
 -- @
-hasqlMoverWith :: forall ms. (All Migration ms) => PerformMigrationOpts -> IO ()
-hasqlMoverWith opts = do
+hasqlMover :: forall ms. (All Migration ms) => IO ()
+hasqlMover = do
   cli <-
     O.execParser
       ( O.info
-          (hasqlMoverOpts O.<**> O.helper)
+          (hasqlMoverCliOpts O.<**> O.helper)
           (O.fullDesc <> O.progDesc "Perform or check hasql-mover migrations")
       )
-  result <- performMigrations @ms opts cli
-  case result of
-    Right () -> pure ()
-    Left err -> putDoc (prettyMigrationError err <+> R.softline)
-
-hasqlMover :: forall ms. (All Migration ms) => IO ()
-hasqlMover = hasqlMoverWith @ms defaultPerformMigrationOpts
+  hasqlMoverWith @ms cli defaultPerformMigrationOpts
 
 data MigrationError
   = MigrationCheckError !Sql.SessionError
